@@ -713,6 +713,9 @@ const AP_Scheduler::Task AP_Vehicle::scheduler_tasks[] = {
 #if AP_ARMING_ENABLED
     SCHED_TASK(update_arming,          1,     50, 253),
 #endif
+#if HAL_SERVO_BENCH_OSCILLATE
+    SCHED_TASK(update_servo_bench_oscillate,  50, 200, 254),
+#endif
 };
 
 void AP_Vehicle::get_common_scheduler_tasks(const AP_Scheduler::Task*& tasks, uint8_t& num_tasks)
@@ -1241,6 +1244,158 @@ void AP_Vehicle::fence_init()
     hal.scheduler->register_io_process(FUNCTOR_BIND_MEMBER(&AP_Vehicle::fence_checks_async, void));
 }
 #endif  // AP_FENCE_ENABLED
+
+#if HAL_SERVO_BENCH_OSCILLATE
+// S4 is 0-based channel 3. SERVO_BLH_RVMASK is not enough on this bench: motor-test
+// soft-arms immediately, and update_channel_masks() refuses DShot commands while armed.
+static void bench_send_top_motor_reverse()
+{
+    if (hal.util->get_soft_armed()) {
+        return;
+    }
+    hal.rcout->set_dshot_esc_type(AP_HAL::RCOutput::DSHOT_ESC_BLHELI);
+    hal.rcout->send_dshot_command(AP_HAL::RCOutput::DSHOT_REVERSE, 3, 0, 20, true);
+}
+
+// Boot bench: spin both motors ~7% for 2 s, then idle. Does not drive gimbals (S1/S2).
+//   Motor_Bottom_North  -> S3 / chan 2
+//   Motor_Top_North     -> S4 / chan 3
+// DShot only emits non-zero throttle while soft-armed; motor SERVOs kept Disabled so motors lib cannot fight.
+void AP_Vehicle::update_servo_bench_oscillate()
+{
+    static bool prepared;
+    static bool done;
+    static bool bench_soft_arm;
+    static uint32_t spin_start_ms;
+    static int16_t saved_function[2];
+
+    // If the vehicle is really armed (not our bench soft-arm), stay out of the way
+    if (hal.util->get_soft_armed() && !bench_soft_arm) {
+        return;
+    }
+
+    const uint32_t now_ms = AP_HAL::millis();
+    if (now_ms < 3000) {
+        return;
+    }
+
+    const uint16_t motor_idle_pwm = 1000;
+    const uint16_t motor_spin_pwm = 1070;  // ~7%
+    const uint32_t spin_duration_ms = 2000;
+    const uint32_t motor_chan_mask = (1U << 2) | (1U << 3);
+
+    if (!prepared) {
+        // Only touch motor channels — leave gimbal SERVO1/2 alone
+        for (uint8_t i = 0; i < 2; i++) {
+            const uint8_t servo_n = 3 + i;
+            char pname[20];
+            enum ap_var_type ptype;
+            AP_Param *vp;
+
+            hal.util->snprintf(pname, sizeof(pname), "SERVO%u_FUNCTION", unsigned(servo_n));
+            vp = AP_Param::find(pname, &ptype);
+            if (vp != nullptr && ptype == AP_PARAM_INT16) {
+                // Disabled (k_none), RAM only — not written to EEPROM
+                saved_function[i] = static_cast<AP_Int16 *>(vp)->get();
+                static_cast<AP_Int16 *>(vp)->set(0);
+            }
+
+            hal.util->snprintf(pname, sizeof(pname), "SERVO%u_MIN", unsigned(servo_n));
+            vp = AP_Param::find(pname, &ptype);
+            if (vp != nullptr && ptype == AP_PARAM_INT16) {
+                static_cast<AP_Int16 *>(vp)->set(1000);
+            }
+            hal.util->snprintf(pname, sizeof(pname), "SERVO%u_MAX", unsigned(servo_n));
+            vp = AP_Param::find(pname, &ptype);
+            if (vp != nullptr && ptype == AP_PARAM_INT16) {
+                static_cast<AP_Int16 *>(vp)->set(2000);
+            }
+        }
+
+        {
+            enum ap_var_type ptype;
+            AP_Param *vp = AP_Param::find("MOT_PWM_TYPE", &ptype);
+            if (vp != nullptr) {
+                if (ptype == AP_PARAM_INT8) {
+                    static_cast<AP_Int8 *>(vp)->set(6);  // DShot600
+                } else if (ptype == AP_PARAM_INT16) {
+                    static_cast<AP_Int16 *>(vp)->set(6);
+                }
+            }
+        }
+
+        SRV_Channels::update_aux_servo_function();
+        hal.rcout->force_safety_off();
+        hal.rcout->set_output_mode(motor_chan_mask, AP_HAL::RCOutput::MODE_PWM_DSHOT600);
+        bench_send_top_motor_reverse();
+
+        bench_soft_arm = true;
+        AP_Motors *motors = AP::motors();
+        if (motors != nullptr) {
+            motors->output_min();
+            motors->armed(true);
+            motors->set_interlock(true);
+        }
+        hal.util->set_soft_armed(true);
+
+        spin_start_ms = now_ms;
+        prepared = true;
+        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "Bench: motors 7%% for 2s");
+    }
+
+    if (done) {
+        SRV_Channels::set_output_pwm_chan(2, motor_idle_pwm);
+        SRV_Channels::set_output_pwm_chan(3, motor_idle_pwm);
+        // Keep pushing reverse while disarmed so a dashboard motor-test inherits it
+        static uint32_t last_dir_ms;
+        if (now_ms - last_dir_ms >= 1000) {
+            last_dir_ms = now_ms;
+            bench_send_top_motor_reverse();
+        }
+        return;
+    }
+
+    const bool spinning = (now_ms - spin_start_ms) < spin_duration_ms;
+    const uint16_t mot_pwm = spinning ? motor_spin_pwm : motor_idle_pwm;
+
+    if (bench_soft_arm) {
+        hal.util->set_soft_armed(true);
+        AP_Motors *motors = AP::motors();
+        if (motors != nullptr && !motors->armed()) {
+            motors->armed(true);
+            motors->set_interlock(true);
+        }
+    }
+    hal.rcout->set_output_mode(motor_chan_mask, AP_HAL::RCOutput::MODE_PWM_DSHOT600);
+    SRV_Channels::set_output_pwm_chan(2, mot_pwm);  // Motor_Bottom_North
+    SRV_Channels::set_output_pwm_chan(3, mot_pwm);  // Motor_Top_North
+
+    if (!spinning) {
+        AP_Motors *motors = AP::motors();
+        if (motors != nullptr) {
+            motors->armed(false);
+            motors->set_interlock(false);
+        }
+        if (bench_soft_arm) {
+            hal.util->set_soft_armed(false);
+            bench_soft_arm = false;
+        }
+        // Hand the motor outputs back so MAV_CMD_DO_MOTOR_TEST still works
+        for (uint8_t i = 0; i < 2; i++) {
+            char pname[20];
+            enum ap_var_type ptype;
+            hal.util->snprintf(pname, sizeof(pname), "SERVO%u_FUNCTION", unsigned(3 + i));
+            AP_Param *vp = AP_Param::find(pname, &ptype);
+            if (vp != nullptr && ptype == AP_PARAM_INT16) {
+                static_cast<AP_Int16 *>(vp)->set(saved_function[i]);
+            }
+        }
+        SRV_Channels::update_aux_servo_function();
+        done = true;
+        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "Bench: motors idle");
+    }
+}
+#endif  // HAL_SERVO_BENCH_OSCILLATE
 
 AP_Vehicle *AP_Vehicle::_singleton = nullptr;
 

@@ -537,6 +537,11 @@ protected:
     // check for motor noise at a particular frequency
     void check_motor_noise();
 
+#if HAL_SERVO_BENCH_OSCILLATE
+    // Matek bench demo: spin motors 2s then idle; does not drive gimbals
+    void update_servo_bench_oscillate();
+#endif
+
 #if HAL_WITH_ESC_TELEM
     // code common to multiple vehicles which ensures ESC telemetry is
     // reporting that all motors are performing.
