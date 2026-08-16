@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Vector vehicle configuration",
+  "description": "Mirrors Vector/dashboard/server/config.py. Prose reference: Vector/docs/07-configuration.md",
+  "type": "object",
+  "required": ["arms"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "vehicle": { "$ref": "#/definitions/vehicle" },
+    "gimbal_defaults": {
+      "description": "Inherited by every arm. An arm only states what makes it different.",
+      "$ref": "#/definitions/gimbal"
+    },
+    "arms": {
+      "type": "array",
+      "description": "One entry per arm. Adding an arm needs no code changes.",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/arm" }
+    },
+    "link": { "$ref": "#/definitions/link" },
+    "bench_limits": { "$ref": "#/definitions/benchLimits" },
+    "bench_controller": { "$ref": "#/definitions/benchController" }
+  },
+
+  "definitions": {
+    "vehicle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "summary": { "type": "string" },
+        "controller": { "type": "string", "description": "Flight controller model. Reference only." },
+        "frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "layout": {
+              "type": "string",
+              "description": "Descriptive only; real geometry comes from each arm's azimuth_deg.",
+              "enum": ["plus", "x"]
+            },
+            "nose_arm": { "type": "string", "description": "Arm id the nose points along." },
+            "rotor_diagonal_m": { "type": "number", "exclusiveMinimum": 0 },
+            "arm_length_m": {
+              "type": "number",
+              "description": "Hub to centre, metres. Sets moment arms and the 3D model.",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "battery": {
+          "type": "object",
+          "description": "Reference only; live values come from telemetry.",
+          "additionalProperties": false,
+          "properties": {
+            "chemistry": { "type": "string", "examples": ["li-ion", "lipo"] },
+            "cells_series": { "type": "integer", "minimum": 1 },
+            "cells_parallel": { "type": "integer", "minimum": 1 },
+            "capacity_mah": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    },
+
+    "axis": {
+      "type": "object",
+      "description": "One gimbal axis: the servo driving it and the geometry of that drive.",
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "type": "integer",
+          "description": "Output channel. Above the controller's own output count means the CAN-to-PWM board.",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "sign": {
+          "type": "number",
+          "description": "Direction. Absorbs how the servo and linkage are mounted. The only place direction is recorded: do not also set SERVOn_REVERSED.",
+          "enum": [-1, 1]
+        },
+        "center_us": { "type": "integer", "minimum": 500, "maximum": 2500 },
+        "us_per_deg": {
+          "type": "number",
+          "description": "Pulse microseconds per servo degree. 11.11111 for a 500-2500 us, +/-90 degree servo.",
+          "exclusiveMinimum": 0
+        },
+        "servo_limit_deg": {
+          "type": "number",
+          "description": "How far the servo itself may travel from centre. Describe the servo honestly; gimbal travel is bounded separately by tilt_limit_deg, which is enforced first.",
+          "exclusiveMinimum": 0
+        },
+        "min_us": {
+          "type": "integer",
+          "description": "Last-resort electrical clamp, not the operating limit.",
+          "minimum": 500,
+          "maximum": 2500
+        },
+        "max_us": { "type": "integer", "minimum": 500, "maximum": 2500 },
+        "trim_deg": {
+          "type": "number",
+          "description": "Mechanical zero offset, servo degrees. On the inner axis this costs reachable tilt one degree for one degree, so centre the horn mechanically first."
+        }
+      }
+    },
+
+    "gimbal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gear_ratio": {
+          "type": "number",
+          "description": "Servo degrees per gimbal degree. 2.0 for a 2:1 reduction. Use sign for direction, never a negative ratio.",
+          "exclusiveMinimum": 0
+        },
+        "tilt_limit_deg": {
+          "type": "number",
+          "description": "Maximum geometric tilt per axis. The operating envelope, enforced before any other limit.",
+          "exclusiveMinimum": 0,
+          "maximum": 90
+        },
+        "coupling": {
+          "type": "number",
+          "description": "How much outer-axis motion leaks into the inner axis and must be added back to the inner command. 1.0 when the inner servo is mounted to the airframe, 0.0 when it rides on the outer ring.",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "outer": { "$ref": "#/definitions/axis" },
+        "inner": { "$ref": "#/definitions/axis" }
+      }
+    },
+
+    "motor": {
+      "type": "object",
+      "required": ["channel"],
+      "additionalProperties": false,
+      "properties": {
+        "channel": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "spin": {
+          "type": "string",
+          "description": "Rotation direction, for display and prop-fitting checks.",
+          "enum": ["cw", "ccw"]
+        },
+        "reversed": {
+          "type": "boolean",
+          "description": "Whether the ESC needs a DShot reverse command. Exactly one motor per coaxial pair should be reversed so both push up."
+        },
+        "test_sequence": {
+          "type": ["integer", "null"],
+          "description": "The number MAV_CMD_DO_MOTOR_TEST expects. NOT the output channel: ArduPilot addresses motors by position in the frame's test order, which depends on FRAME_CLASS and FRAME_TYPE. null means not established, and the dashboard refuses to spin that motor.",
+          "minimum": 1
+        }
+      }
+    },
+
+    "arm": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable identifier used in commands and URLs. Must be unique.",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "label": { "type": "string" },
+        "status": {
+          "type": "string",
+          "description": "live is wired and commandable, planned is described but not built, disabled is built but out of service. Only live arms are ever written to.",
+          "enum": ["live", "planned", "disabled"]
+        },
+        "azimuth_deg": {
+          "type": "number",
+          "description": "Where the arm physically points, from body +X toward body +Y. Sets the moment arm and tangential yaw direction.",
+          "minimum": 0,
+          "exclusiveMaximum": 360
+        },
+        "mount_yaw_deg": {
+          "type": "number",
+          "description": "How far the gimbal assembly is rotated about body Z. Sets how gimbal angles map to thrust direction. Usually equals azimuth_deg, but differs if a gimbal is bolted on rotated relative to its arm.",
+          "minimum": 0,
+          "exclusiveMaximum": 360
+        },
+        "gimbal": {
+          "description": "Full gimbal override. Prefer the outer/inner shorthand for channel-only differences.",
+          "$ref": "#/definitions/gimbal"
+        },
+        "outer": {
+          "description": "Outer (roll) axis overrides. Mounted to the arm.",
+          "$ref": "#/definitions/axis"
+        },
+        "inner": {
+          "description": "Inner (pitch) axis overrides. Carried by the outer ring.",
+          "$ref": "#/definitions/axis"
+        },
+        "motors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bottom": { "$ref": "#/definitions/motor" },
+            "top": { "$ref": "#/definitions/motor" }
+          }
+        }
+      }
+    },
+
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "device": { "type": "string", "examples": ["/dev/ttyACM0", "/dev/ttyUSB0"] },
+        "baud": { "type": "integer", "exclusiveMinimum": 0 },
+        "esc_telemetry_serial": {
+          "type": ["integer", "null"],
+          "description": "Which SERIALn carries ESC telemetry, so the UI can name the right parameter. 6 (UART4) on the Matek H743-Wing.",
+          "minimum": 0
+        }
+      }
+    },
+
+    "benchLimits": {
+      "type": "object",
+      "description": "Hard bounds on what the dashboard will do, enforced server side.",
+      "additionalProperties": false,
+      "properties": {
+        "motor_percent": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+        "motor_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "servo_speed_deg_s": { "type": "number", "exclusiveMinimum": 0 },
+        "default_servo_speed_deg_s": { "type": "number", "exclusiveMinimum": 0 },
+        "command_rate_hz": {
+          "type": "number",
+          "description": "Rate of the levelling loop and streamed aiming. Also drives the serial budget estimate.",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+
+    "benchController": {
+      "type": "object",
+      "description": "Host-side levelling demo. NOT flight control; see Vector/docs/04-control.md.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["off", "level"] },
+        "level_gain": {
+          "type": "number",
+          "description": "0 leaves the gimbals with the airframe, 1 holds thrust at true world vertical.",
+          "minimum": 0,
+          "maximum": 1.5
+        },
+        "lead_time_s": {
+          "type": "number",
+          "description": "Seconds of attitude extrapolation, to offset servo lag. Measure it rather than guessing.",
+          "minimum": 0,
+          "maximum": 0.5
+        },
+        "max_tilt_fraction": { "type": "number", "minimum": 0.05, "maximum": 1 },
+        "invert_roll": {
+          "type": "boolean",
+          "description": "Bench sign flip. Once the right sign is known, fold it into the axis sign instead."
+        },
+        "invert_pitch": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,168 @@
+{
+  "$schema": "./vector.schema.json",
+  "schema_version": 1,
+  "vehicle": {
+    "name": "Vector",
+    "summary": "Thrust-vectoring quadrotor. Four arms, each carrying a coaxial counter-rotating motor pair in a two-axis gimbal.",
+    "controller": "Matek H743-Wing V3",
+    "frame": {
+      "layout": "plus",
+      "nose_arm": "north",
+      "rotor_diagonal_m": 0.81,
+      "arm_length_m": 0.405
+    },
+    "battery": {
+      "chemistry": "li-ion",
+      "cells_series": 6,
+      "cells_parallel": 2,
+      "capacity_mah": 10000
+    }
+  },
+  "gimbal_defaults": {
+    "gear_ratio": 2,
+    "tilt_limit_deg": 22.5,
+    "coupling": 1,
+    "outer": {
+      "sign": -1,
+      "center_us": 1500,
+      "us_per_deg": 11.11111,
+      "servo_limit_deg": 90,
+      "min_us": 500,
+      "max_us": 2500,
+      "trim_deg": 0
+    },
+    "inner": {
+      "sign": 1,
+      "center_us": 1500,
+      "us_per_deg": 11.11111,
+      "servo_limit_deg": 90,
+      "min_us": 500,
+      "max_us": 2500,
+      "trim_deg": 0
+    }
+  },
+  "arms": [
+    {
+      "id": "north",
+      "label": "North",
+      "status": "live",
+      "azimuth_deg": 0,
+      "mount_yaw_deg": 0,
+      "outer": {
+        "channel": 1
+      },
+      "inner": {
+        "channel": 2
+      },
+      "motors": {
+        "bottom": {
+          "channel": 3,
+          "spin": "ccw",
+          "reversed": true,
+          "test_sequence": 1
+        },
+        "top": {
+          "channel": 4,
+          "spin": "ccw",
+          "reversed": true,
+          "test_sequence": 3
+        }
+      }
+    },
+    {
+      "id": "east",
+      "label": "East",
+      "status": "planned",
+      "azimuth_deg": 90,
+      "mount_yaw_deg": 90,
+      "outer": {
+        "channel": 14
+      },
+      "inner": {
+        "channel": 15
+      },
+      "motors": {
+        "bottom": {
+          "channel": 5,
+          "spin": "ccw",
+          "reversed": false
+        },
+        "top": {
+          "channel": 6,
+          "spin": "cw",
+          "reversed": true
+        }
+      }
+    },
+    {
+      "id": "south",
+      "label": "South",
+      "status": "planned",
+      "azimuth_deg": 180,
+      "mount_yaw_deg": 180,
+      "outer": {
+        "channel": 16
+      },
+      "inner": {
+        "channel": 17
+      },
+      "motors": {
+        "bottom": {
+          "channel": 7,
+          "spin": "ccw",
+          "reversed": false
+        },
+        "top": {
+          "channel": 8,
+          "spin": "cw",
+          "reversed": true
+        }
+      }
+    },
+    {
+      "id": "west",
+      "label": "West",
+      "status": "planned",
+      "azimuth_deg": 270,
+      "mount_yaw_deg": 270,
+      "outer": {
+        "channel": 18
+      },
+      "inner": {
+        "channel": 19
+      },
+      "motors": {
+        "bottom": {
+          "channel": 9,
+          "spin": "ccw",
+          "reversed": false
+        },
+        "top": {
+          "channel": 10,
+          "spin": "cw",
+          "reversed": true
+        }
+      }
+    }
+  ],
+  "link": {
+    "device": "/dev/ttyACM0",
+    "baud": 115200,
+    "esc_telemetry_serial": 6
+  },
+  "bench_limits": {
+    "motor_percent": 7,
+    "motor_seconds": 15,
+    "servo_speed_deg_s": 180,
+    "default_servo_speed_deg_s": 45,
+    "command_rate_hz": 25
+  },
+  "bench_controller": {
+    "mode": "off",
+    "level_gain": 1,
+    "lead_time_s": 0.06,
+    "max_tilt_fraction": 1,
+    "invert_roll": false,
+    "invert_pitch": false
+  }
+}

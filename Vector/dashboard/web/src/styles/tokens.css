@@ -1,0 +1,76 @@
+/*
+ * Design tokens for the Vector dashboard.
+ *
+ * Every colour, space and radius in the app comes from here. Panels never invent
+ * their own values, so the whole UI can be retuned from one file.
+ *
+ * The palette is deliberately narrow: a near-black background, three surface
+ * steps, one accent, and semantic colours reserved for state. Colour carries
+ * meaning here — if everything is coloured, nothing is.
+ */
+:root {
+  /* surfaces, darkest first */
+  --bg: #06080d;
+  --surface-1: #0b1018;
+  --surface-2: #111825;
+  --surface-3: #18212f;
+  --surface-hover: #1d2838;
+
+  --line: #1e2836;
+  --line-strong: #2b3849;
+
+  /* text */
+  --text: #e6ecf7;
+  --text-dim: #97a4b8;
+  --text-faint: #64707f;
+
+  /* one accent, used for interactive and "this is live" only */
+  --accent: #3ba7ff;
+  --accent-dim: #1d6ba8;
+  --accent-wash: rgba(59, 167, 255, 0.12);
+
+  /* semantic state */
+  --ok: #38d39f;
+  --warn: #f0b429;
+  --danger: #ff5d5d;
+  --danger-dim: #a83232;
+  --ok-wash: rgba(56, 211, 159, 0.12);
+  --warn-wash: rgba(240, 180, 41, 0.12);
+  --danger-wash: rgba(255, 93, 93, 0.12);
+
+  /* per-arm identity, used consistently in every chart, diagram and table */
+  --arm-north: #3ba7ff;
+  --arm-east: #38d39f;
+  --arm-south: #f0b429;
+  --arm-west: #c98bff;
+
+  /* type */
+  --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 19px;
+  --fs-2xl: 26px;
+
+  /* space, on a 4px grid */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.3);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  --nav-width: 208px;
+  --topbar-height: 52px;
+  --content-max: 1500px;
+}
