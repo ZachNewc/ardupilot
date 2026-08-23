@@ -289,29 +289,104 @@ class Bench:
     # ------------------------------------------------------------------
     def assert_output_mapping(self) -> str:
         """
-        Re-apply the motor output mapping and DShot direction flags.
+        Push the config's output mapping onto the flight controller.
 
-        Gimbal channels are left Disabled on purpose: the dashboard drives them with
-        DO_SET_SERVO, which the flight controller only honours on a disabled output.
+        Three things have to agree or an output silently does nothing:
+
+        * **Gimbal channels stay Disabled.** DO_SET_SERVO is only honoured on a
+          disabled output, so that is correct here and wrong for flight.
+        * **Gimbal pulse limits.** DO_SET_SERVO is clamped to SERVOn_MIN..MAX, so a
+          board left at the 1000-2000 default throws away the ends of a 500-2500
+          gimbal window without reporting anything. SERVOn_REVERSED is forced to 0
+          because the axis signs live in the config, so there is one place to look.
+        * **Motor channels need a motor function.** A Disabled output emits nothing,
+          so a motor whose ``function`` is unset cannot spin no matter what else is
+          configured. That is reported rather than guessed.
+        * **Planned motors are placed too.** An octaquad mixer has eight slots.
+          Unclaimed ones are auto-assigned to S1, S2, ... on the next boot, which
+          puts DShot on the North gimbal timer. Planned East/West motors occupy
+          those slots on the DShot groups so the servo pins stay PWM.
         """
         self.link.require()
         self.link.forget_servo_functions()
 
         reverse_mask = 0
-        motor_channels: List[int] = []
-        for arm in self._cfg.live_arms():
-            for name in ("outer", "inner"):
-                self.link.set_servo_function(arm.gimbal.axis(name).channel, FUNC_DISABLED)
-            for motor in arm.motors.values():
-                motor_channels.append(motor.channel)
+        motors_mapped: List[int] = []
+        motors_unmapped: List[str] = []
+
+        # Motor functions for every arm, including planned. An octaquad mixer has
+        # eight motor slots; any slot we do not place gets auto-assigned to the
+        # default pin on the next boot. That is how Motor2 kept landing on S2 and
+        # putting TIM8 (the North gimbals) into DShot. Planned motors live on the
+        # DShot timer groups, so empty pins there are harmless; a motor function on
+        # a servo pin is not.
+        for arm in self._cfg.arms:
+            for name, motor in arm.motors.items():
+                if motor.function is None:
+                    motors_unmapped.append(f"{arm.id}.{name} (S{motor.channel})")
+                    continue
+                self.link.set_servo_function(motor.channel, float(motor.function))
+                motors_mapped.append(motor.channel)
                 if motor.reversed:
                     # SERVO_BLH_RVMASK bit N is SERVO(N+1).
                     reverse_mask |= 1 << (motor.channel - 1)
 
+        for arm in self._cfg.live_arms():
+            for name in ("outer", "inner"):
+                axis = arm.gimbal.axis(name)
+                self.link.set_servo_function(axis.channel, FUNC_DISABLED)
+                self.link.set_param(f"SERVO{axis.channel}_MIN", float(axis.min_us))
+                self.link.set_param(f"SERVO{axis.channel}_MAX", float(axis.max_us))
+                self.link.set_param(f"SERVO{axis.channel}_TRIM", float(axis.center_us))
+                self.link.set_param(f"SERVO{axis.channel}_REVERSED", 0.0)
+
         self.link.set_param("SERVO_DSHOT_ESC", DSHOT_ESC_BLHELI)
         self.link.set_param("SERVO_BLH_RVMASK", float(reverse_mask))
-        return self.link.note(
-            f"Output mapping asserted: {len(motor_channels)} motor channels, reverse mask 0x{reverse_mask:X}"
+
+        text = (
+            f"Output mapping asserted: {len(motors_mapped)} motor channels, "
+            f"reverse mask 0x{reverse_mask:X}"
+        )
+        if motors_unmapped:
+            text += (
+                f". No motor function set for {', '.join(motors_unmapped)} -- "
+                "those outputs stay Disabled and will not spin"
+            )
+        note = self.link.note(text)
+
+        mismatch = self.check_frame()
+        if mismatch:
+            self.link.record_error(mismatch)
+        return note
+
+    def check_frame(self) -> Optional[str]:
+        """
+        Compare the board's frame against the one the config's motor numbers assume.
+
+        Returns a description of the mismatch, or None. This is a read, not a write:
+        FRAME_CLASS only takes effect after a reboot, and changing it rearranges which
+        physical motor answers to which mixer slot, so it is not something to assert
+        behind the operator's back.
+
+        Worth checking on every connect because the failure is silent. A motor whose
+        number does not exist on the board's frame is simply never driven -- no refusal,
+        no message, just an output that stays at zero.
+        """
+        frame = (self._cfg.raw.get("vehicle") or {}).get("frame") or {}
+        wrong = []
+        for key, param in (("frame_class", "FRAME_CLASS"), ("frame_type", "FRAME_TYPE")):
+            want = frame.get(key)
+            if want is None:
+                continue
+            got = self.link.get_param(param)
+            if got is not None and int(got) != int(want):
+                wrong.append(f"{param} is {int(got)}, config expects {int(want)}")
+        if not wrong:
+            return None
+        return (
+            "; ".join(wrong)
+            + ". The motor numbers in the config belong to another frame, so motors that "
+            "do not exist on this one will never spin. Set these by hand and reboot."
         )
 
     def spin_motors(

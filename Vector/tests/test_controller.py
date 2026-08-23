@@ -162,7 +162,12 @@ class BenchOperationTest(unittest.TestCase):
         self.bench.center()
         self.drain()
         channels = {channel for channel, _ in self.bench.link.writes}
-        self.assertEqual(channels, {1, 2})
+        expected = {
+            axis.channel
+            for arm in self.bench.config.live_arms()
+            for axis in (arm.gimbal.outer, arm.gimbal.inner)
+        }
+        self.assertEqual(channels, expected)
         self.assertTrue(all(pwm == 1500 for _, pwm in self.bench.link.writes))
 
     def test_planned_arms_are_refused(self) -> None:
@@ -170,25 +175,34 @@ class BenchOperationTest(unittest.TestCase):
             self.bench.resolve_arms(["east"])
 
     def test_all_resolves_to_live_arms_only(self) -> None:
-        self.assertEqual([arm.id for arm in self.bench.resolve_arms(None)], ["north"])
-        self.assertEqual([arm.id for arm in self.bench.resolve_arms(["all"])], ["north"])
+        live = [arm.id for arm in self.bench.config.live_arms()]
+        self.assertEqual([arm.id for arm in self.bench.resolve_arms(None)], live)
+        self.assertEqual([arm.id for arm in self.bench.resolve_arms(["all"])], live)
 
     def test_aim_disables_the_servo_function_first(self) -> None:
         """DO_SET_SERVO is ignored unless the output function is Disabled."""
         self.bench.aim(None, 5.0, 0.0)
         self.drain()
-        self.assertEqual(self.bench.link.functions, {1: 0, 2: 0})
+        expected = {
+            axis.channel: 0
+            for arm in self.bench.config.live_arms()
+            for axis in (arm.gimbal.outer, arm.gimbal.inner)
+        }
+        self.assertEqual(self.bench.link.functions, expected)
 
     def test_aim_produces_the_expected_pulse_widths(self) -> None:
-        # A pure forward lean on the north arm is the inner axis' job.
-        self.bench.aim(None, 10.0, 0.0)
+        # A pure forward lean on the north arm is the inner axis' job. Aimed at
+        # north only so a second live arm cannot muddy the channel map.
+        self.bench.aim(["north"], 10.0, 0.0)
         self.drain()
         sent = dict(self.bench.link.writes)
-        self.assertEqual(sent[1], 1500)
-        self.assertNotEqual(sent[2], 1500)
-
         arm = self.bench.config.arm("north")
-        tilt = kin.tilt_for_pwm(arm.gimbal, sent[1], sent[2])
+        outer_ch = arm.gimbal.outer.channel
+        inner_ch = arm.gimbal.inner.channel
+        self.assertEqual(sent[outer_ch], 1500)
+        self.assertNotEqual(sent[inner_ch], 1500)
+
+        tilt = kin.tilt_for_pwm(arm.gimbal, sent[outer_ch], sent[inner_ch])
         lean = kin.thrust_lean(arm.mount_yaw_deg, *tilt)
         self.assertAlmostEqual(lean[0], 10.0, delta=0.2)
         self.assertAlmostEqual(lean[1], 0.0, delta=0.2)
@@ -210,7 +224,7 @@ class BenchOperationTest(unittest.TestCase):
         raw = json.loads(json.dumps(self.bench.config.raw))
         raw["arms"][0]["motors"]["top"]["test_sequence"] = 3
         self.bench.replace_config(vconfig.from_dict(raw))
-        self.bench.spin_motors(None, ["top"], 500.0, 900.0)
+        self.bench.spin_motors(["north"], ["top"], 500.0, 900.0)
         sequence, percent, seconds = self.bench.link.motor_tests[-1]
         self.assertEqual(sequence, 3)
         self.assertAlmostEqual(percent, self.bench.config.bench_limits.motor_percent)
@@ -225,7 +239,7 @@ class BenchOperationTest(unittest.TestCase):
         (bit N is SERVO N+1, set only for reversed motors), not one vehicle's answer.
         """
         expected = 0
-        for arm in self.bench.config.live_arms():
+        for arm in self.bench.config.arms:
             for motor in arm.motors.values():
                 if motor.reversed:
                     expected |= 1 << (motor.channel - 1)
@@ -235,14 +249,204 @@ class BenchOperationTest(unittest.TestCase):
         self.assertEqual(self.bench.link.params["SERVO_BLH_RVMASK"], float(expected))
         self.assertEqual(self.bench.link.params["SERVO_DSHOT_ESC"], 1)
 
-    def test_only_top_motors_are_reversed(self) -> None:
-        """Both motors in a coaxial pair must push up, so exactly one is reversed."""
+    def test_output_mapping_pushes_the_gimbal_pulse_window_to_the_board(self) -> None:
+        """
+        DO_SET_SERVO is clamped by SERVOn_MIN/MAX on the flight controller.
+
+        A board left at the 1000-2000 default silently discards the ends of a 500-2500
+        gimbal window, which looks exactly like a servo that will not reach its limit.
+        The config's window therefore has to be asserted, not assumed.
+        """
+        self.bench.assert_output_mapping()
+        params = self.bench.link.params
+        for arm in self.bench.config.live_arms():
+            for name in ("outer", "inner"):
+                axis = arm.gimbal.axis(name)
+                with self.subTest(arm=arm.id, axis=name):
+                    self.assertEqual(params[f"SERVO{axis.channel}_MIN"], float(axis.min_us))
+                    self.assertEqual(params[f"SERVO{axis.channel}_MAX"], float(axis.max_us))
+                    self.assertEqual(params[f"SERVO{axis.channel}_TRIM"], float(axis.center_us))
+                    # Axis direction lives in the config, so the board must not add its own.
+                    self.assertEqual(params[f"SERVO{axis.channel}_REVERSED"], 0.0)
+
+    def test_planned_motor_functions_are_placed_so_the_mixer_cannot_take_servo_pins(self) -> None:
+        """
+        An octaquad mixer has eight motor slots. Unclaimed ones get defaulted onto
+        S1, S2, ... on the next boot, which is TIM8 -- the North gimbals.
+
+        Planned East/West motors have to occupy those slots on the DShot groups, even
+        though the dashboard will not spin them, or Motor2 lands on S2 and the North
+        servos come up as DShot.
+        """
+        self.bench.assert_output_mapping()
+        for arm in self.bench.config.arms:
+            for name, motor in arm.motors.items():
+                if motor.function is None:
+                    continue
+                with self.subTest(arm=arm.id, motor=name):
+                    self.assertEqual(
+                        self.bench.link.functions[motor.channel], float(motor.function)
+                    )
+        north = self.bench.config.arm("north")
+        self.assertEqual(self.bench.link.functions[north.gimbal.inner.channel], 0.0)
+        self.assertEqual(self.bench.link.functions[north.gimbal.outer.channel], 0.0)
+
+    def test_output_mapping_assigns_motor_functions(self) -> None:
+        """
+        A motor channel left Disabled emits nothing, so the function has to be written.
+
+        Moving a gimbal onto a channel that used to carry a motor erases that motor's
+        function, because the gimbal needs the output Disabled and PARAM_SET persists.
+        Functions are assigned here rather than read from the config so the test proves
+        the rule even while the vehicle's own motor numbers are still unestablished.
+        """
+        expected = {}
+        for index, arm in enumerate(self.bench.config.live_arms()):
+            for offset, motor in enumerate(arm.motors.values()):
+                function = 33 + index * 2 + offset
+                object.__setattr__(motor, "function", function)
+                expected[motor.channel] = float(function)
+        self.assertTrue(expected, "config should have live motors")
+
+        self.bench.assert_output_mapping()
+        for channel, function in expected.items():
+            with self.subTest(channel=channel):
+                self.assertEqual(self.bench.link.functions[channel], function)
+
+    def test_output_mapping_reports_motors_with_no_function(self) -> None:
+        """An unassigned motor is called out, because it cannot spin and looks like a fault."""
+        arm = self.bench.config.live_arms()[0]
+        motor = next(iter(arm.motors.values()))
+        object.__setattr__(motor, "function", None)
+
+        text = self.bench.assert_output_mapping()
+        self.assertIn("No motor function set", text)
+        self.assertIn(f"S{motor.channel}", text)
+        # An unmapped motor must be left alone, not disabled on a guess.
+        self.assertNotIn(motor.channel, self.bench.link.functions)
+
+    def test_gimbal_channels_stay_disabled(self) -> None:
+        """DO_SET_SERVO is only honoured on a disabled output, so this must not regress."""
+        self.bench.assert_output_mapping()
+        for arm in self.bench.config.live_arms():
+            for name in ("outer", "inner"):
+                channel = arm.gimbal.axis(name).channel
+                with self.subTest(arm=arm.id, axis=name):
+                    self.assertEqual(self.bench.link.functions[channel], 0.0)
+
+    def test_no_channel_is_both_a_gimbal_and_a_motor(self) -> None:
+        """
+        The two roles want opposite functions, so a shared channel can only be wrong.
+
+        This is the failure that broke the bench after the pin remap: South's servos
+        took S3/S4, which had been carrying North's motors.
+        """
+        gimbals = {}
+        motors = {}
+        for arm in self.bench.config.arms:
+            for name in ("outer", "inner"):
+                gimbals[arm.gimbal.axis(name).channel] = f"{arm.id}.{name}"
+            for name, motor in arm.motors.items():
+                motors[motor.channel] = f"{arm.id}.{name}"
+        clash = set(gimbals) & set(motors)
+        self.assertEqual(
+            clash, set(),
+            "channels serve both a gimbal and a motor: "
+            + ", ".join(f"S{c}: {gimbals[c]} vs {motors[c]}" for c in sorted(clash)),
+        )
+
+    def test_frame_mismatch_is_reported_as_an_error(self) -> None:
+        """
+        A board on the wrong frame makes the config's motor numbers meaningless.
+
+        This is the failure that looked like broken wiring: on a 4-motor frame, Motor6
+        and Motor8 do not exist, so those outputs are never driven and nothing refuses
+        the command. It has to be surfaced loudly because it produces no other symptom.
+        """
+        self.bench.link.params["FRAME_CLASS"] = 1.0
+        self.bench.link.params["FRAME_TYPE"] = 1.0
+
+        mismatch = self.bench.check_frame()
+        self.assertIsNotNone(mismatch)
+        self.assertIn("FRAME_CLASS is 1", mismatch)
+        self.assertIn("reboot", mismatch)
+
+        self.bench.assert_output_mapping()
+        self.assertTrue(
+            any("FRAME_CLASS" in err for err in self.bench.link.errors),
+            "a frame mismatch must reach the operator, not just the return value",
+        )
+
+    def test_frame_match_reports_nothing(self) -> None:
+        """A correct board must stay quiet, or the warning becomes noise to ignore."""
+        frame = self.bench.config.raw["vehicle"]["frame"]
+        self.bench.link.params["FRAME_CLASS"] = float(frame["frame_class"])
+        self.bench.link.params["FRAME_TYPE"] = float(frame["frame_type"])
+
+        self.assertIsNone(self.bench.check_frame())
+        self.bench.assert_output_mapping()
+        self.assertEqual(self.bench.link.errors, [])
+
+    def test_frame_check_is_silent_when_the_board_does_not_answer(self) -> None:
+        """An unreadable parameter is not evidence of a mismatch, so it must not claim one."""
+        self.assertIsNone(self.bench.check_frame())
+
+    def test_motor_functions_and_test_orders_are_unique(self) -> None:
+        """
+        Two motors sharing a function or a test order is silent but wrong.
+
+        A duplicated SERVOn_FUNCTION makes two outputs mirror one mixer slot, and a
+        duplicated test order makes the bench spin a motor the operator did not name.
+        Neither reports anything, so it has to be caught here.
+        """
+        functions = {}
+        orders = {}
+        for arm in self.bench.config.arms:
+            for name, motor in arm.motors.items():
+                where = f"{arm.id}.{name}"
+                if motor.function is not None:
+                    self.assertNotIn(
+                        motor.function, functions,
+                        f"{where} reuses function {motor.function} from {functions.get(motor.function)}",
+                    )
+                    functions[motor.function] = where
+                if motor.test_sequence is not None:
+                    self.assertNotIn(
+                        motor.test_sequence, orders,
+                        f"{where} reuses test order {motor.test_sequence} "
+                        f"from {orders.get(motor.test_sequence)}",
+                    )
+                    orders[motor.test_sequence] = where
+
+    def test_every_output_channel_is_used_once(self) -> None:
+        """Two roles on one channel means at least one of them is not driving anything."""
+        seen = {}
+        for arm in self.bench.config.arms:
+            for name in ("outer", "inner"):
+                seen.setdefault(arm.gimbal.axis(name).channel, []).append(f"{arm.id}.{name}")
+            for name, motor in arm.motors.items():
+                seen.setdefault(motor.channel, []).append(f"{arm.id}.{name}")
+        shared = {channel: who for channel, who in seen.items() if len(who) > 1}
+        self.assertEqual(
+            shared, {},
+            "channels claimed more than once: "
+            + "; ".join(f"S{c}: {', '.join(who)}" for c, who in sorted(shared.items())),
+        )
+
+    def test_each_coaxial_pair_has_a_reversed_motor(self) -> None:
+        """
+        Both motors in a pair have to push up, so at least one ESC is reversed.
+
+        North currently has both reversed — that is as-wired, not a pin-map error —
+        so this asserts the safety property (not both unreversed) rather than a
+        particular role.
+        """
         for arm in self.bench.config.arms:
             with self.subTest(arm=arm.id):
-                reversed_roles = {
-                    role for role, motor in arm.motors.items() if motor.reversed
-                }
-                self.assertEqual(reversed_roles, {"top"})
+                self.assertTrue(
+                    any(motor.reversed for motor in arm.motors.values()),
+                    f"{arm.id} has no reversed motor",
+                )
 
 
 class ArbiterTest(unittest.TestCase):

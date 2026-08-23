@@ -21,7 +21,7 @@ the airframe is facing.
 
 ## Current state
 
-One arm (North) is built and wired. The other three are described in the config with
+North and South are built and wired. East and West are described in the config with
 status `planned`, which means the dashboard shows them but refuses to command them.
 
 The gimbal kinematics are derived, implemented in Python and TypeScript, and covered
@@ -42,7 +42,10 @@ Vector/
     web/                  Vue 3 + Vite frontend
   docs/                   this documentation
   tests/                  unit and contract tests
-  tools/                  build/flash, WSL USB helpers, the real launcher
+  tools/
+    fc-report.py          read-only: what the board believes, diffed against the config
+    build-and-flash.sh    firmware
+    dashboard.sh          the real launcher behind start.sh
 ```
 
 Everything Vector-specific lives under `Vector/`. The surrounding tree is an
@@ -53,6 +56,9 @@ unmodified ArduPilot checkout, so it can be rebased on upstream without conflict
 ```bash
 # Bench dashboard (builds the web app if stale, then serves it)
 Vector/start.sh
+
+# When something on the bench does not move. Read-only, safe to run any time
+Vector/tools/fc-report.py
 
 # Tests
 python3 -m unittest discover -s Vector/tests

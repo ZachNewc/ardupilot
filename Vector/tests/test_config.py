@@ -108,7 +108,7 @@ class SchemaTest(unittest.TestCase):
         )
 
         motor_keys = set(self.schema["definitions"]["motor"]["properties"])
-        self.assertEqual(motor_keys, {"channel", "spin", "reversed", "test_sequence"})
+        self.assertEqual(motor_keys, {"channel", "spin", "reversed", "test_sequence", "function"})
 
 
 class LoaderTest(unittest.TestCase):

@@ -53,9 +53,15 @@ only missing piece is the gimbal mixer.
 `test_sequence` values in `vector.json` are only valid for one `FRAME_CLASS`/`FRAME_TYPE`
 combination.
 
-The config currently records North as `bottom: 1, top: 3`, which is correct for the
-**QUAD / X** frame the vehicle was bench-tested with. Switching to OCTAQUAD / PLUS
-changes them to `bottom: 1, top: 2`.
+The vehicle was originally bench-tested as **QUAD / X**, where North's pair is Motor1
+and Motor2 with test orders 1 and 3. It is now configured for OCTAQUAD / PLUS, so those
+test orders became 1 and 2 and the functions became Motor1 and Motor6. Nothing in the
+firmware notices the difference — the numbers simply mean something else, which is why
+they cannot be carried across a frame change unchanged.
+
+`frame_class` and `frame_type` in `vector.json` record the frame those numbers belong
+to. `Vector/tools/fc-report.py` compares them against the board and flags a mismatch,
+because a frame mismatch invalidates every motor number at once.
 
 Anything left as `null` means "not established", and the dashboard refuses to spin that
 motor rather than guessing. That is the right default — a wrong test number spins an
@@ -65,19 +71,34 @@ unexpected motor.
 
 | Parameter | Value | Why |
 |---|---|---|
-| `SERVO3_FUNCTION` … | 33–40 | Motor1–Motor8, per the table above |
+| `FRAME_CLASS` | 4 | OCTAQUAD. Needs a reboot |
+| `FRAME_TYPE` | 0 | PLUS, matching arms at 0/90/180/270 |
+| `SERVOn_FUNCTION` | 33–40 | Motor1–Motor8, per the table above |
 | `MOT_PWM_TYPE` | 6 | DShot600 |
 | `SERVO_DSHOT_ESC` | 1 | BLHeli, needed for the reverse command |
 | `SERVO_BLH_RVMASK` | bitmask | Bit N is SERVO(N+1); set for each top motor |
 | `SERIAL6_PROTOCOL` | 16 | ESC Telemetry on UART4 (RX4) |
 
 Top motors run reversed so that both motors in a coaxial pair produce upward thrust.
-The dashboard asserts `SERVO_DSHOT_ESC` and `SERVO_BLH_RVMASK` on connect, from the
-`reversed` flags in the config, so the direction survives an ESC power cycle.
 
-Remember the timer grouping from [Hardware](02-hardware.md): every output sharing a
-timer must use the same mode. With motors on S3–S10 (TIM5 and TIM4), both groups are
-entirely DShot, which is what you want.
+The dashboard asserts the `SERVOn_FUNCTION` values, the DShot flags and the gimbal pulse
+limits on connect, all from `vector.json`, so the board cannot drift away from the config
+unnoticed. It deliberately does **not** write `FRAME_CLASS` or `FRAME_TYPE`: those need a
+reboot, and changing them rearranges which physical motor answers to which mixer slot.
+
+### An output with no function emits nothing
+
+This is worth stating plainly because it is silent. `SERVOn_FUNCTION = 0` (Disabled)
+produces no signal at all — not a centre pulse, not a zero throttle, nothing. A motor on
+a disabled output cannot spin however correct the rest of the configuration is.
+
+It is also easy to cause by accident. The dashboard needs gimbal outputs Disabled for
+`DO_SET_SERVO`, and `PARAM_SET` persists to EEPROM, so pointing a gimbal at a channel
+that used to carry a motor permanently erases that motor's function. Reassigning outputs
+therefore means reasserting the mapping, not just editing the config.
+
+Run `Vector/tools/fc-report.py` when something does not move. It is read-only and prints
+the board's own view of every output next to what the config expects.
 
 ## Gimbal output parameters
 

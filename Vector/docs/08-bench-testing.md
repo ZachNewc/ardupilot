@@ -30,13 +30,38 @@ granted, so press Re-request streams.
 
 ## 2. Output mapping
 
-Press Re-apply output mapping. This sets `SERVO_DSHOT_ESC` and `SERVO_BLH_RVMASK` from
-the `reversed` flags in the config.
+Press Re-apply output mapping. From `vector.json` this sets, for every live arm:
 
-**Expect:** an event confirming the motor channel count and reverse mask.
+- each motor channel's `SERVOn_FUNCTION`, without which that output emits nothing at all
+- each gimbal channel's `SERVOn_FUNCTION` to 0, which is what `DO_SET_SERVO` requires
+- each gimbal channel's `SERVOn_MIN`, `MAX`, `TRIM` and `REVERSED`, because the flight
+  controller clamps `DO_SET_SERVO` to that window and a board at the 1000–2000 default
+  quietly discards the ends of the travel
+- `SERVO_DSHOT_ESC` and `SERVO_BLH_RVMASK` from the `reversed` flags
+
+**Expect:** an event confirming the motor channel count and reverse mask. If it names
+motors with no function set, those arms cannot spin until `function` is filled in.
 
 Do this after any ESC power cycle. Reverse direction is not persistent in every ESC
 firmware.
+
+### Confirming it took
+
+`Vector/tools/fc-report.py` reads the board and prints its view of every output beside
+what the config expects. It writes nothing, so it is safe at any point.
+
+```bash
+Vector/tools/fc-report.py                     # /dev/ttyACM0
+Vector/tools/fc-report.py --device /dev/ttyACM1   # while the dashboard holds ACM0
+```
+
+It reports the frame, the safety parameters, every output's function and pulse window,
+which timer groups are being asked to mix modes, and the live `SERVO_OUTPUT_RAW` values.
+An output reading 0 there is emitting nothing.
+
+`FRAME_CLASS` and `FRAME_TYPE` are the one thing the dashboard will not fix for you. They
+need a reboot, and changing them rearranges which physical motor answers to which mixer
+slot, so the report flags a mismatch and leaves it to you.
 
 ## 3. Gimbal centre
 
@@ -204,3 +229,12 @@ them — they end up in `vector.json`, which is the record.
 | No ESC telemetry | `SERIAL6_PROTOCOL` not 16, or the telemetry wire is not on RX4 |
 | Servos jitter | Two writers — check the arbiter owner on screen; or SBEC ground not bonded |
 | Pulse readout differs from what was commanded | Something else is writing those outputs |
+| A motor does nothing, commands accepted | `SERVOn_FUNCTION` is 0. A disabled output emits no signal at all |
+| Nothing on any output after moving a channel | Reassigning a gimbal onto a motor's old channel erased that motor's function, and `PARAM_SET` persists. Re-apply the mapping |
+| Motor test spins a different motor than named | `test_sequence` is for another `FRAME_CLASS`/`FRAME_TYPE` |
+| Gimbal will not reach its limit | `SERVOn_MIN`/`MAX` still at 1000–2000, clamping the 500–2500 window |
+| Servo silent but the report shows a valid pulse | Signal is arriving; look downstream at SBEC power or the ground bond |
+
+When more than one of these is true at once, run `Vector/tools/fc-report.py` before
+changing anything. Most of them are a board that disagrees with `vector.json`, and the
+report says which parameter in one line instead of a guess per symptom.

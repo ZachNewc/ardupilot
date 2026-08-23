@@ -36,6 +36,8 @@ export interface MotorConfig {
   spin: 'cw' | 'ccw'
   reversed: boolean
   testSequence: number | null
+  /** SERVOn_FUNCTION for this output: 33-40 for Motor1-Motor8. null means unassigned. */
+  function: number | null
 }
 
 export interface ArmConfig {

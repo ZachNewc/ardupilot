@@ -93,58 +93,48 @@ not of ArduPilot.
 Twelve usable outputs against a requirement of 8 ESC signals plus 8 servos is why the
 CAN-to-PWM board exists on this vehicle.
 
-### As built today (North arm only)
+### As built today (North and South)
 
 | Function | Output | Group | Mode |
 |---|---|---|---|
-| North outer servo | S1 | TIM8 | PWM |
-| North inner servo | S2 | TIM8 | PWM |
-| North bottom motor | S3 | TIM5 | DShot600 |
-| North top motor | S4 | TIM5 | DShot600, reversed |
+| North inner servo | S1 | TIM8 | PWM |
+| North outer servo | S2 | TIM8 | PWM |
+| South top motor | S5 | TIM5 | DShot600, reversed |
+| South bottom motor | S6 | TIM5 | DShot600 |
+| North bottom motor | S7 | TIM4 | DShot600 |
+| North top motor | S8 | TIM4 | DShot600, reversed |
+| South outer servo | S11 | TIM15 | PWM |
+| South inner servo | S12 | TIM15 | PWM |
 
-Servos and ESCs land in different timer groups, so both modes coexist cleanly. This
-mapping is verified on hardware.
+Every group is single-mode: TIM8 and TIM15 carry only servos, TIM4 and TIM5 carry only
+motors. S3 and S4 sit unused on the motor side of TIM5, which is harmless.
 
-### Planned for all four arms
+South's servos were briefly on S3/S4, which put PWM servos and DShot motors on TIM5 at
+once. Moving them to TIM15 was the cheapest fix: two signal wires, and nothing else in
+the allocation had to change.
 
-Motors take the two all-DShot groups:
+### Planned for East and West
 
-| Arm | Bottom | Top |
-|---|---|---|
-| North | S3 | S4 |
-| East | S5 | S6 |
-| South | S7 | S8 |
-| West | S9 | S10 |
+| Arm | Outer | Inner | Bottom | Top |
+|---|---|---|---|---|
+| East | S14 | S15 | S9 | S10 |
+| West | S18 | S19 | S4 | S3 |
 
-That fills TIM5 and TIM4 completely with DShot, which is exactly what you want. It
-also means the two 4-in-1 ESCs are wired by arm pair rather than by motor role.
-
-Servos are **not yet allocated**. There are two remaining PWM outputs (S1, S2 on TIM8;
-S11 and S12 on TIM15 are also free) and eight servos to place. The options:
-
-- **All eight on the CAN-to-PWM board.** Every gimbal gets identical timing and
-  latency. North's current S1/S2 wiring becomes bench-only. This is the cleanest
-  option and the config supports it today — channels 14 and up in `vector.json` mean
-  "past the flight controller's own outputs".
-- **Four on the flight controller (S1, S2, S11, S12), four on CAN.** Uses hardware
-  already present, but two gimbals respond on a different path from the other two,
-  which makes any timing-related asymmetry hard to diagnose.
-
-This is deliberately left open; see [Roadmap](10-roadmap.md). The config's channel
-numbers are the only place the decision has to be recorded, and nothing in the code
-enumerates channels any other way.
+East and West servos stay on the CAN-to-PWM board (channels 14 and up). East motors
+take the unused half of TIM4 next to North. West motors take the free half of TIM5 next
+to South, so all eight ESC signals end up on the two DShot groups and all eight servo
+signals on PWM groups or CAN. No later arm forces a rewire of an earlier one.
 
 ### Current config channel map
 
-Taken from `Vector/config/vector.json`. Channels 14 and up are CAN-to-PWM placeholders
-for the planned arms.
+Taken from `Vector/config/vector.json`. Channels 14 and up are CAN-to-PWM placeholders.
 
 | Arm | Status | Outer | Inner | Bottom | Top |
 |---|---|---|---|---|---|
-| North | live | S1 | S2 | S3 | S4 |
-| East | planned | S14 | S15 | S5 | S6 |
-| South | planned | S16 | S17 | S7 | S8 |
-| West | planned | S18 | S19 | S9 | S10 |
+| North | live | S2 | S1 | S7 | S8 |
+| East | planned | S14 | S15 | S9 | S10 |
+| South | live | S11 | S12 | S6 | S5 |
+| West | planned | S18 | S19 | S4 | S3 |
 
 `planned` means the dashboard displays the arm but refuses to command it. Only `live`
 arms are ever written to.

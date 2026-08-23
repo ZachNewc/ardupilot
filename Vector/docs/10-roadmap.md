@@ -4,8 +4,9 @@
 
 | Item | State |
 |---|---|
-| North arm | Built, wired, bench-tested |
-| East / South / West arms | Not built. Described in the config as `planned` |
+| North arm | Built, wired |
+| South arm | Built, wired. Servos moved to S11/S12 so TIM5 carries motors only |
+| East / West arms | Not built. Described in the config as `planned` |
 | Gimbal kinematics | Derived, implemented, tested in two languages |
 | Dashboard | Complete as a bench tool |
 | Documentation | This set |
@@ -14,10 +15,12 @@
 
 ## Verified on hardware
 
-- North gimbal servos on S1/S2, motors on S3/S4
 - ESC telemetry on RX4, `SERIAL6_PROTOCOL` 16
-- DShot600 with the top motor reversed via BLHeli passthrough
-- `MAV_CMD_DO_MOTOR_TEST` sequences 1 and 3 under QUAD / X
+- DShot600 with a reversed top motor via BLHeli passthrough
+- `MAV_CMD_DO_MOTOR_TEST` sequences 1 and 3 under QUAD / X (North, on the previous S3/S4 wiring)
+
+That verification no longer transfers. The frame moved to OCTAQUAD / PLUS, which renumbers
+North's pair to test orders 1 and 2, and the motors moved to S7/S8.
 
 ## Not yet verified
 
@@ -25,10 +28,13 @@ Listed explicitly so nothing here gets mistaken for measured fact:
 
 - The 2:1 gear ratio and ±22.5° limit as *built*, versus as designed
 - Servo lag, which sets `lead_time_s`. Currently a placeholder of 60 ms
-- Axis `sign` values for the three unbuilt arms
+- Axis `sign` values for East and West
+- Every `test_sequence` and `function` under OCTAQUAD / PLUS. The numbers are taken from
+  `AP_MotorsMatrix::setup_octaquad_matrix()`, so they follow from the frame, but which
+  physical motor answers each one is still unconfirmed on this airframe
 - Whether the outer axis reaches ±22.5° without binding
 - Whether the coaxial pair's torques actually cancel closely enough to ignore
-- Every number relating to the three unbuilt arms
+- Every number relating to the two unbuilt arms
 
 The [bench testing](08-bench-testing.md) procedures establish all of these.
 
@@ -36,14 +42,17 @@ The [bench testing](08-bench-testing.md) procedures establish all of these.
 
 ### Servo output allocation
 
-Undecided, deliberately. The flight controller has 12 usable PWM outputs and the timer
-grouping means a group cannot mix DShot and servo PWM. Motors take S3–S10 (two full
-timer groups). That leaves S1, S2, S11, S12 for servos, against a requirement of eight.
+Now decided for the onboard outputs, and the timer groups are clean: servos on TIM8
+(S1, S2) and TIM15 (S11, S12), motors on TIM4 (S7–S10) and TIM5 (S3–S6). All eight ESC
+signals fit the two DShot groups, so no future arm forces an earlier one to be rewired.
+
+That accounts for four servos. East and West still need four more, and the controller has
+only S13 left, so they remain on the CAN-to-PWM board.
 
 | Option | Trade-off |
 |---|---|
-| All eight servos on CAN-to-PWM | Uniform timing across gimbals. Adds a CAN dependency to every gimbal |
-| Four on the controller, four on CAN | Uses existing hardware. Two gimbals respond on a different path from the others |
+| Four on the controller, four on CAN | What is planned. Uses existing hardware. Two gimbals respond on a different path from the others |
+| All eight servos on CAN-to-PWM | Uniform timing across gimbals. Adds a CAN dependency to every gimbal, and wastes four working outputs |
 
 Recorded in [Hardware](02-hardware.md). The only place the decision has to land is the
 channel numbers in `vector.json`.
@@ -69,14 +78,18 @@ under position control only. Affects how the vehicle behaves in manually-flown m
 
 ## Planned work, in order
 
-### 1. Build a second arm
+### 1. Re-establish the outputs, then prove both arms
 
-Everything about the geometry generalises across arms in software already, but exactly
-one arm has been built. A second arm — East, opposite in mount yaw — is the first real
-test of the mount-yaw transform on hardware, and it is cheap compared to building all
-three.
+The frame moved to OCTAQUAD / PLUS and South's servos moved to S11/S12, so every motor
+number changed meaning and no earlier bench result carries over. Set `FRAME_CLASS` 4 and
+`FRAME_TYPE` 0, reboot, then confirm with `Vector/tools/fc-report.py` that the board and
+`vector.json` agree before touching a motor.
 
-Change required: `status` from `planned` to `live` in the config. Nothing else.
+Then run the bench sequence on both arms, props off: centres, signs, envelope, and which
+physical motor each test order actually spins.
+
+East (90° mount yaw) is still the first real test of the mount-yaw transform on a
+third arm. Change required once it is built: `status` from `planned` to `live`.
 
 ### 2. SITL frame model
 

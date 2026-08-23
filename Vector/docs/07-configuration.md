@@ -263,7 +263,9 @@ Errors name the exact path, for example
     "inner": { "sign":  1, "center_us": 1500, "us_per_deg": 11.11111,
                "servo_limit_deg": 90.0, "min_us": 500, "max_us": 2500, "trim_deg": 0.0 }
   },
-  "arms": [ "north (live, S1/S2, S3/S4)", "east", "south", "west" ],
+  "arms": [ "north (live, inner S1 / outer S2, motors S7/S8)",
+             "south (live, outer S11 / inner S12, motors S6/S5)",
+             "east", "west" ],
   "link": { "device": "/dev/ttyACM0", "baud": 115200, "esc_telemetry_serial": 6 },
   "bench_limits": { "motor_percent": 50.0, "motor_seconds": 10.0,
                     "servo_speed_deg_s": 180.0, "default_servo_speed_deg_s": 45.0,

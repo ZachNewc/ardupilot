@@ -119,7 +119,11 @@ class StateShapeTest(unittest.TestCase):
     def test_every_arm_is_reported_not_just_live_ones(self) -> None:
         """The UI shows planned arms too; that is how the build state stays visible."""
         self.assertEqual(len(self.snap["arms"]), 4)
-        self.assertEqual([arm["live"] for arm in self.snap["arms"]], [True, False, False, False])
+        cfg = vconfig.load()
+        self.assertEqual(
+            [arm["live"] for arm in self.snap["arms"]],
+            [entry.status == "live" for entry in cfg.arms],
+        )
 
     def test_controller_keys(self) -> None:
         self.assertEqual(

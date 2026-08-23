@@ -47,6 +47,14 @@
               "type": "number",
               "description": "Hub to centre, metres. Sets moment arms and the 3D model.",
               "exclusiveMinimum": 0
+            },
+            "frame_class": {
+              "type": "integer",
+              "description": "Expected FRAME_CLASS on the flight controller. 4 is OCTAQUAD, which is what gives each arm a coaxial pair. This is the frame the motor function numbers were taken from, so the two must agree or the mixer addresses the wrong outputs. Changing it on the board needs a reboot, so the dashboard reports a mismatch rather than writing it."
+            },
+            "frame_type": {
+              "type": "integer",
+              "description": "Expected FRAME_TYPE. 0 is PLUS, matching arms at 0/90/180/270."
             }
           }
         },
@@ -150,6 +158,12 @@
           "type": ["integer", "null"],
           "description": "The number MAV_CMD_DO_MOTOR_TEST expects. NOT the output channel: ArduPilot addresses motors by position in the frame's test order, which depends on FRAME_CLASS and FRAME_TYPE. null means not established, and the dashboard refuses to spin that motor.",
           "minimum": 1
+        },
+        "function": {
+          "type": ["integer", "null"],
+          "description": "The SERVOn_FUNCTION value that makes this channel a motor output: 33-40 for Motor1-Motor8. A Disabled output emits no signal at all, so a motor with no function set cannot spin. Which motor number an arm position maps to depends on FRAME_CLASS and FRAME_TYPE, so null means not established and the dashboard reports it rather than guessing.",
+          "minimum": 33,
+          "maximum": 40
         }
       }
     },

@@ -130,6 +130,8 @@ class MavlinkLink:
         self._heartbeat_at = 0.0
         self._function_cache: Dict[int, float] = {}
         self._event_seq = 0
+        self._param_values: Dict[str, float] = {}
+        self._param_arrived = threading.Event()
 
     # ------------------------------------------------------------------
     # connection
@@ -433,8 +435,16 @@ class MavlinkLink:
         ))
         del snap.events[:-EVENT_HISTORY]
 
+    def _on_param_value(self, snap: Telemetry, msg: Any) -> None:
+        name = msg.param_id
+        if not isinstance(name, str):
+            name = bytes(name).decode("ascii", "ignore")
+        self._param_values[name.rstrip("\x00")] = float(msg.param_value)
+        self._param_arrived.set()
+
     _HANDLERS: Dict[str, Any] = {
         "HEARTBEAT": _on_heartbeat,
+        "PARAM_VALUE": _on_param_value,
         "ATTITUDE": _on_attitude,
         "VFR_HUD": _on_vfr_hud,
         "SYS_STATUS": _on_sys_status,
@@ -462,6 +472,32 @@ class MavlinkLink:
                 float(value),
                 mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
             )
+
+    def get_param(self, name: str, timeout: float = 2.0) -> Optional[float]:
+        """
+        Read one parameter, or None if the vehicle does not answer in time.
+
+        Reads matter as much as writes here. Several parameters cannot be asserted
+        safely -- FRAME_CLASS needs a reboot to take effect -- so the only way to know
+        the board agrees with the config is to ask it. The reader thread owns all
+        receives, so this requests and then waits for that thread to record the reply.
+        """
+        conn = self.require()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._param_arrived.clear()
+            with self._tx_lock:
+                conn.mav.param_request_read_send(
+                    conn.target_system, conn.target_component, name.encode("ascii"), -1
+                )
+            while time.time() < deadline:
+                if not self._param_arrived.wait(timeout=0.25):
+                    break
+                self._param_arrived.clear()
+                value = self._param_values.get(name)
+                if value is not None:
+                    return value
+        return self._param_values.get(name)
 
     def set_servo_function(self, channel: int, function: float) -> None:
         """Set SERVOn_FUNCTION, skipping the write when it already holds that value."""
@@ -491,8 +527,13 @@ class MavlinkLink:
         Drive one output directly.
 
         DO_SET_SERVO is refused unless the output's function is Disabled, so the
-        function is forced first. That is a RAM-only change on the flight
-        controller; it is not written to EEPROM.
+        function is forced first.
+
+        That write persists. PARAM_SET is saved to EEPROM by the flight controller, so
+        disabling an output here permanently un-assigns whatever it used to do. Moving
+        a gimbal onto a channel that used to carry a motor will therefore erase that
+        motor's function, and :meth:`Bench.assert_output_mapping` has to put the motor
+        functions back for the channels the config says are motors.
         """
         self.set_servo_function(channel, FUNC_DISABLED)
         self.command_long(mavutil.mavlink.MAV_CMD_DO_SET_SERVO, float(channel), float(pwm))

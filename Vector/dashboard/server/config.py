@@ -92,12 +92,20 @@ class MotorConfig:
     addresses motors by their position in the frame's test order, not by output
     channel, so it has to be recorded per motor rather than derived. ``None`` means
     it has not been established yet and the dashboard will refuse to spin that motor.
+
+    ``function`` is the ``SERVOn_FUNCTION`` value that makes the channel a motor
+    output: 33-40 for Motor1-Motor8. Without it the output stays Disabled and emits
+    nothing at all, so it cannot be derived or defaulted -- which motor number a given
+    arm and position maps to depends on the frame class, and guessing spins the wrong
+    motor. ``None`` means unestablished, and the dashboard reports it rather than
+    picking a value.
     """
 
     channel: int
     spin: str
     reversed: bool
     test_sequence: Optional[int] = None
+    function: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -299,11 +307,18 @@ def _arm_from_dict(data: Dict[str, Any], defaults: Dict[str, Any], index: int) -
         if channel < 1 or channel > 32:
             raise ConfigError(f"{where}.motors.{name}: channel {channel} outside SERVO1..SERVO32")
         sequence = entry.get("test_sequence")
+        function = entry.get("function")
+        if function is not None and not 33 <= int(function) <= 40:
+            raise ConfigError(
+                f"{where}.motors.{name}: function {function} is not a motor output; "
+                "Motor1..Motor8 are 33..40"
+            )
         motors[name] = MotorConfig(
             channel=channel,
             spin=str(entry.get("spin", "ccw")),
             reversed=bool(entry.get("reversed", False)),
             test_sequence=None if sequence is None else int(sequence),
+            function=None if function is None else int(function),
         )
 
     return ArmConfig(
@@ -458,6 +473,7 @@ def arm_to_dict(arm: ArmConfig) -> Dict[str, Any]:
                 "spin": motor.spin,
                 "reversed": motor.reversed,
                 "testSequence": motor.test_sequence,
+                "function": motor.function,
             }
             for name, motor in arm.motors.items()
         },
