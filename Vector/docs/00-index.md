@@ -21,8 +21,11 @@ the airframe is facing.
 
 ## Current state
 
-North and South are built and wired. East and West are described in the config with
-status `planned`, which means the dashboard shows them but refuses to command them.
+All four arms are `live` in the config. Every gimbal servo and the North and East
+motors are on the flight controller's own outputs and answer with nothing but a USB
+cable. South and West motors are ESCs behind the CAN-to-PWM node (S14–S17): they need
+DroneCAN running, only turn under the motor test, and take their direction from the ESC
+itself — see [Hardware](02-hardware.md) for what the node has to be told.
 
 The gimbal kinematics are derived, implemented in Python and TypeScript, and covered
 by a shared set of golden test vectors. The dashboard is complete as a bench tool.
@@ -44,12 +47,14 @@ Vector/
   tests/                  unit and contract tests
   tools/
     fc-report.py          read-only: what the board believes, diffed against the config
+    motor-direction.py    spin each motor, observe rotation, correct the config
     build-and-flash.sh    firmware
     dashboard.sh          the real launcher behind start.sh
 ```
 
-Everything Vector-specific lives under `Vector/`. The surrounding tree is an
-unmodified ArduPilot checkout, so it can be rebased on upstream without conflicts.
+Everything Vector-specific lives under `Vector/`. The surrounding tree stays close
+to upstream ArduPilot; the one firmware delta is `AP_BLHeli` reading every ESC
+telemetry UART so RX3 and RX4 both report.
 
 ## Quick start
 
@@ -59,6 +64,9 @@ Vector/start.sh
 
 # When something on the bench does not move. Read-only, safe to run any time
 Vector/tools/fc-report.py
+
+# Establish which way each propeller actually turns. Props off
+Vector/tools/motor-direction.py
 
 # Tests
 python3 -m unittest discover -s Vector/tests

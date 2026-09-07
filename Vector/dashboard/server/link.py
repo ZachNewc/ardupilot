@@ -17,7 +17,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from pymavlink import mavutil
 
@@ -516,6 +516,21 @@ class MavlinkLink:
         with self._tx_lock:
             conn.mav.command_long_send(conn.target_system, conn.target_component, command, 0, *args)
 
+    def reboot(self) -> str:
+        """
+        Reboot the flight controller.
+
+        Needed more often than it looks. Several things the dashboard writes only take
+        effect at boot: SERVO_BLH_RVMASK is @RebootRequired, and a timer group's output
+        mode (PWM against DShot) is decided during initialisation from the motor
+        functions present at that moment. Writing those parameters at runtime leaves the
+        board reporting the new value while still behaving like the old one.
+
+        The USB link drops as the board goes down, so the caller has to reconnect.
+        """
+        self.command_long(mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 1.0)
+        return self.note("Reboot commanded; the link will drop and must be reopened")
+
     def command_long_quiet(self, command: int, *params: float) -> None:
         try:
             self.command_long(command, *params)
@@ -550,3 +565,56 @@ class MavlinkLink:
             float(percent),
             float(seconds),
         )
+
+    def set_mode_stabilize(self) -> None:
+        """Copter Stabilize. Custom mode 0; the mixer then takes throttle from RC."""
+        conn = self.require()
+        with self._tx_lock:
+            conn.mav.set_mode_send(
+                conn.target_system,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                0,
+            )
+
+    def set_rc_override(self, channels: Sequence[int]) -> None:
+        """
+        Hold RC channels from the GCS.
+
+        A value of 0 clears that channel's override (ArduPilot treats 0 as none).
+        65535 leaves the channel alone. The override times out in a few seconds
+        unless it is resent, which is why a running spin keeps calling this.
+        """
+        conn = self.require()
+        values = [int(v) for v in list(channels)[:8]]
+        while len(values) < 8:
+            values.append(65535)
+        with self._tx_lock:
+            conn.mav.rc_channels_override_send(
+                conn.target_system, conn.target_component, *values
+            )
+
+    def clear_rc_override(self) -> None:
+        self.set_rc_override((0, 0, 0, 0, 0, 0, 0, 0))
+
+    def force_arm(self) -> None:
+        """
+        Arm, skipping the usual pre-arm list.
+
+        21196 is ArduPilot's documented force value. Safety is dropped first so
+        a board that still has the switch engaged will actually emit throttle.
+        Mandatory checks (RC-calibrating, serial protocol) still run.
+        """
+        self.command_long(mavutil.mavlink.MAV_CMD_DO_SET_SAFETY_SWITCH_STATE, 1.0)
+        self.command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1.0, 21196.0)
+
+    def force_disarm(self) -> None:
+        self.command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0)
+
+    def wait_armed(self, want: bool, timeout: float = 3.0) -> bool:
+        """Poll HEARTBEAT until the armed flag matches, or time out."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.telemetry().armed == want:
+                return True
+            time.sleep(0.05)
+        return self.telemetry().armed == want

@@ -38,6 +38,29 @@ function touch() {
   problem.value = null
 }
 
+function telemSerialsText(): string {
+  const serials = draft.value.link?.esc_telemetry_serials
+  if (Array.isArray(serials) && serials.length) {
+    return serials.join(', ')
+  }
+  const single = draft.value.link?.esc_telemetry_serial
+  return single == null || single === '' ? '' : String(single)
+}
+
+function setTelemSerials(event: Event) {
+  if (!draft.value.link) {
+    return
+  }
+  const target = event.target as HTMLInputElement
+  draft.value.link.esc_telemetry_serials = target.value
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map(Number)
+    .filter((n) => Number.isFinite(n))
+  delete draft.value.link.esc_telemetry_serial
+  touch()
+}
+
 /* Channel conflicts are the failure that silently destroys hardware, so the form
    checks for them locally and refuses to submit rather than relying on the server's
    rejection alone. */
@@ -52,7 +75,7 @@ const conflicts = computed(() => {
       claims.push([(motor as any)?.channel, `${arm.id}.${name}`])
     }
     for (const [channel, who] of claims) {
-      if (typeof channel !== 'number') continue
+      if (typeof channel !== 'number' || channel < 1) continue
       owners.set(channel, [...(owners.get(channel) ?? []), who])
     }
   }
@@ -132,6 +155,59 @@ function flipSign(axis: AxisName) {
 }
 
 const workspace = computed(() => (calArm.value ? store.config?.workspaces[calArm.value] : null))
+
+/* ----------------------------------------------------------- mapping debug */
+
+/*
+  The output map comes from the server, not from `draft`, because it describes the
+  saved config against the real board. Editing a channel here does not change it until
+  Save; that is deliberate, since a half-typed channel number would otherwise flash
+  spurious "this pin cannot work" warnings on every keystroke.
+*/
+const outputMap = computed(() => store.config?.outputMap ?? null)
+const mapProblems = computed(() => outputMap.value?.problems ?? [])
+
+const probeChannel = ref(1)
+const probeKind = ref<'motor' | 'servo'>('servo')
+
+function ownerOf(channel: number): string {
+  if (channel < 1) return 'disabled (not a pin)'
+  for (const arm of draft.value.arms ?? []) {
+    if (arm.outer?.channel === channel) return `${arm.label || arm.id} outer servo`
+    if (arm.inner?.channel === channel) return `${arm.label || arm.id} inner servo`
+    for (const name of ['bottom', 'top'] as MotorName[]) {
+      if (arm.motors?.[name]?.channel === channel) {
+        return `${arm.label || arm.id} ${name} motor`
+      }
+    }
+  }
+  return 'unclaimed'
+}
+
+function motorOnChannel(channel: number): { label: string; sequence: number | null } | null {
+  for (const arm of draft.value.arms ?? []) {
+    for (const name of ['bottom', 'top'] as MotorName[]) {
+      const motor = arm.motors?.[name]
+      if (motor?.channel === channel) {
+        return {
+          label: `${arm.label || arm.id} ${name}`,
+          sequence: motor.test_sequence ?? null,
+        }
+      }
+    }
+  }
+  return null
+}
+
+watch(probeChannel, (channel) => {
+  if (motorOnChannel(channel)) {
+    probeKind.value = 'motor'
+  }
+})
+
+function runProbe() {
+  send('probe_output', { channel: probeChannel.value, kind: probeKind.value })
+}
 
 /* ----------------------------------------------------------------- add arm */
 
@@ -243,11 +319,11 @@ function removeArm(index: number) {
             </label>
             <label>
               <span class="label">outer ch</span>
-              <input v-model.number="arm.outer.channel" type="number" min="1" max="32" @input="touch" />
+              <input v-model.number="arm.outer.channel" type="number" min="0" max="32" @input="touch" />
             </label>
             <label>
               <span class="label">inner ch</span>
-              <input v-model.number="arm.inner.channel" type="number" min="1" max="32" @input="touch" />
+              <input v-model.number="arm.inner.channel" type="number" min="0" max="32" @input="touch" />
             </label>
           </div>
 
@@ -260,7 +336,7 @@ function removeArm(index: number) {
                   <input
                     v-model.number="arm.motors[name].channel"
                     type="number"
-                    min="1"
+                    min="0"
                     max="32"
                     @input="touch"
                   />
@@ -274,6 +350,23 @@ function removeArm(index: number) {
                     placeholder="unset"
                     @input="
                       arm.motors[name].test_sequence =
+                        ($event.target as HTMLInputElement).value === ''
+                          ? null
+                          : Number(($event.target as HTMLInputElement).value);
+                      touch()
+                    "
+                  />
+                </label>
+                <label>
+                  <span class="label">fn</span>
+                  <input
+                    :value="arm.motors[name].function ?? ''"
+                    type="number"
+                    min="33"
+                    max="40"
+                    placeholder="unset"
+                    @input="
+                      arm.motors[name].function =
                         ($event.target as HTMLInputElement).value === ''
                           ? null
                           : Number(($event.target as HTMLInputElement).value);
@@ -303,8 +396,13 @@ function removeArm(index: number) {
         right. <strong>Mount yaw</strong> is how the gimbal itself is rotated on that boom; it
         is what makes one body-frame command mean the same thing on every arm. They are usually
         equal, but they are separate because a gimbal can be bolted on rotated.
-        <strong>Test seq</strong> is ArduPilot's motor test ordinal, which is not the output
-        channel &mdash; establish it once with a GCS motor test and record it here.
+        <strong>Channel 0</strong> disables that output: the pin is unclaimed, nothing is
+        written to the flight controller, and two roles may share 0. <strong>Test seq</strong>
+        is ArduPilot's motor test ordinal, which is not the output channel &mdash; establish
+        it once with a GCS motor test and record it here. It is what
+        <code>motor-direction.py</code> addresses. <strong>Fn</strong> is
+        <code>SERVOn_FUNCTION</code>, 33&ndash;40 for Motor1&ndash;Motor8: it is what makes the
+        output a motor at all, and what the Arms page needs to spin one.
       </p>
     </PanelCard>
 
@@ -524,11 +622,10 @@ function removeArm(index: number) {
               <input v-model.number="draft.link.baud" type="number" @input="touch" />
             </label>
             <label>
-              <span class="label">ESC telem serial</span>
+              <span class="label">ESC telem serials</span>
               <input
-                v-model.number="draft.link.esc_telemetry_serial"
-                type="number"
-                @input="touch"
+                :value="telemSerialsText()"
+                @input="setTelemSerials"
               />
             </label>
           </div>
@@ -590,6 +687,114 @@ function removeArm(index: number) {
     </div>
 
     <PanelCard
+      title="Output map"
+      note="What each pin on this board actually is. A timer group is all DShot or all PWM, so one motor in a group decides the mode for every pin in it."
+    >
+      <div class="stack">
+        <div v-if="mapProblems.length" class="alert">
+          <strong v-if="mapProblems.some((p) => p.severity === 'fatal')">
+            This map will not work as written.
+          </strong>
+          <strong v-else>Things the flight controller cannot do for you.</strong>
+          <ul>
+            <li v-for="problem in mapProblems" :key="problem.severity + problem.channel">
+              <StatusPill :tone="problem.severity === 'fatal' ? 'danger' : 'warn'">
+                S{{ problem.channel }}
+              </StatusPill>
+              {{ problem.text }}
+            </li>
+          </ul>
+        </div>
+        <p v-else class="faint small">
+          Every group is single-mode and every mixer slot is placed. No output is silently
+          incapable of the signal it is being asked for.
+        </p>
+
+        <div v-for="group in outputMap?.groups ?? []" :key="group.name" class="group-row">
+          <span class="group-name mono">{{ group.name }}</span>
+          <StatusPill :tone="group.mode === 'DShot' ? 'accent' : group.mode === 'CAN' ? 'idle' : 'ok'">
+            {{ group.mode }}
+          </StatusPill>
+          <span
+            v-for="cell in group.outputs"
+            :key="cell.channel"
+            class="cell mono small"
+            :class="{ free: !cell.owner }"
+          >
+            S{{ cell.channel }}<template v-if="cell.canOutput"> (out {{ cell.canOutput }})</template>
+            <template v-if="cell.owner"> — {{ cell.owner }}</template>
+            <template v-else> — free</template>
+            <template v-if="cell.nodeFunction"> · node fn {{ cell.nodeFunction }}</template>
+          </span>
+        </div>
+      </div>
+    </PanelCard>
+
+    <PanelCard
+      title="Mapping debug"
+      note="Name a pin, not an arm. The only way to settle 'I asked for north top and something else moved' is to drive the output itself."
+    >
+      <div class="stack">
+        <div class="field-grid">
+          <label>
+            <span class="label">channel</span>
+            <select v-model.number="probeChannel">
+              <option v-for="n in 32" :key="n" :value="n">
+                S{{ n }} — {{ ownerOf(n) }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span class="label">test</span>
+            <select v-model="probeKind">
+              <option value="servo">servo: deflect, then centre</option>
+              <option value="motor">motor: spin 1 s</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="row wrap">
+          <button
+            class="primary"
+            :disabled="!canCommand || isPending('probe_output')"
+            @click="runProbe"
+          >
+            {{ probeKind === 'motor' ? `Spin S${probeChannel} for 1 s` : `Sweep S${probeChannel}` }}
+          </button>
+          <button class="ghost" :disabled="!canCommand" @click="send('stop_motors')">
+            Stop motors
+          </button>
+        </div>
+
+        <p class="faint small">
+          Config says this pin is <strong>{{ ownerOf(probeChannel) }}</strong>.
+          <template v-if="probeKind === 'motor' && motorOnChannel(probeChannel)">
+            This drives whatever motor function is <strong>already on the board</strong>
+            for S{{ probeChannel }}, at the bench cap
+            ({{ draft.bench_limits?.motor_percent ?? '?' }}%).
+            Saving a new map here does not move the signal until you apply output
+            mapping. After that, identify from the Arms page by named motor, not by
+            re-probing pin numbers.
+          </template>
+          <template v-else-if="probeKind === 'motor'">
+            Props off. Throttle is the bench cap ({{ draft.bench_limits?.motor_percent ?? '?' }}%).
+            The previous motor function is put back afterwards.
+          </template>
+          <template v-else>
+            The servo moves off centre for about half a second, then returns. S1–S13 are
+            onboard, and a pin in a group the Output map shows as <strong>DShot</strong> will
+            not move a servo however it is commanded. S{{ outputMap?.canServoFirst ?? 14 }} and
+            up go out over the CAN-to-PWM node, and do nothing until output mapping has set
+            the DroneCAN masks (and a reboot if CAN was off) and the node’s own
+            <code>OUTx_FUNCTION</code> matches — the Output map shows the number each output
+            needs. A motor on the node only takes throttle from the motor test, so a motor
+            probe there runs that instead of driving the pin.
+          </template>
+        </p>
+      </div>
+    </PanelCard>
+
+    <PanelCard
       title="Document"
       note="The file as it will be written. Useful for review before saving, and for copying into version control."
       flush
@@ -600,6 +805,23 @@ function removeArm(index: number) {
 </template>
 
 <style scoped>
+.group-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.25rem 0;
+}
+
+.group-name {
+  min-width: 3.5rem;
+  font-weight: 600;
+}
+
+.cell.free {
+  opacity: 0.45;
+}
+
 .savebar {
   display: flex;
   align-items: center;

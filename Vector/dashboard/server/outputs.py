@@ -134,7 +134,9 @@ class OutputArbiter:
         with self._lock:
             if generation is not None and generation != self._generation:
                 return False
-            self._pending.update({int(ch): int(us) for ch, us in values.items()})
+            self._pending.update(
+                {int(ch): int(us) for ch, us in values.items() if int(ch) >= 1}
+            )
             self._ensure_worker_locked()
         self._wake.set()
         return True

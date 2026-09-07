@@ -30,7 +30,11 @@ FRAME = ["FRAME_CLASS", "FRAME_TYPE", "MOT_PWM_TYPE", "MOT_SAFE_DISARM"]
 SAFETY = ["BRD_SAFETY_DEFLT", "BRD_SAFETYOPTION", "BRD_SAFETY_MASK"]
 DSHOT = ["SERVO_DSHOT_ESC", "SERVO_DSHOT_RATE", "SERVO_BLH_MASK", "SERVO_BLH_RVMASK",
          "SERVO_BLH_AUTO", "SERVO_BLH_TRATE"]
-CHANNELS = 13
+CAN = ["CAN_P1_DRIVER", "CAN_D1_PROTOCOL", "CAN_D1_UC_SRV_BM", "CAN_D1_UC_ESC_BM",
+       "CAN_D1_UC_ESC_OF", "CAN_D1_UC_OPTION", "CAN_D1_UC_SRV_RT", "SERVO_32_ENABLE"]
+# Through the node's fourth output. S17 only exists once SERVO_32_ENABLE is set, so an
+# unreadable S17 with that at 0 is expected rather than a fault.
+CHANNELS = 17
 
 # SERVOn_FUNCTION values worth naming. Motor1..Motor8 are 33..40.
 FUNCTIONS = {0: "Disabled", 1: "RCPassThru", 51: "RCIN1", 52: "RCIN2"}
@@ -38,14 +42,12 @@ FUNCTIONS.update({33 + i: f"Motor{i + 1}" for i in range(8)})
 FUNCTIONS.update({94 + i: f"Scripting{i + 1}" for i in range(8)})
 
 # Timer groups on the MatekH743. Every output in a group shares one output mode, so a
-# group carrying both a servo and a DShot motor cannot satisfy both.
-TIMER_GROUPS = {
-    "TIM8": [1, 2],
-    "TIM5": [3, 4, 5, 6],
-    "TIM4": [7, 8, 9, 10],
-    "TIM15": [11, 12],
-    "TIM1": [13],
-}
+# group carrying both a servo and a DShot motor cannot satisfy both. Imported rather
+# than restated: a second copy of this table is how a servo ends up on a pin that
+# physically cannot pulse it.
+from server import board                                              # noqa: E402
+
+TIMER_GROUPS = {group.name: list(group.channels) for group in board.TIMER_GROUPS}
 
 
 def fetch_params(conn, names, rounds=6, batch=12) -> Dict[str, Optional[float]]:
@@ -132,6 +134,8 @@ def report_config_diff(values: Dict[str, Optional[float]]) -> None:
         for name in ("outer", "inner"):
             axis = arm.gimbal.axis(name)
             ch = axis.channel
+            if ch < 1:
+                continue
             for suffix, want, why in (
                 ("FUNCTION", 0, "gimbals need Disabled for DO_SET_SERVO"),
                 ("MIN", axis.min_us, "clamps the gimbal window"),
@@ -143,6 +147,8 @@ def report_config_diff(values: Dict[str, Optional[float]]) -> None:
                 if issue:
                     problems.append(issue)
         for name, motor in arm.motors.items():
+            if motor.channel < 1:
+                continue
             if motor.function is None:
                 problems.append(
                     f"  {arm.id}.{name:6} (S{motor.channel}) has no function in vector.json"
@@ -168,6 +174,78 @@ def report_config_diff(values: Dict[str, Optional[float]]) -> None:
         print("  FRAME_CLASS/FRAME_TYPE: set by hand and reboot. The dashboard will not")
         print("  write these, because changing the frame silently would rearrange which")
         print("  physical motor answers to which mixer slot.")
+
+
+def report_output_map() -> None:
+    """
+    Check vector.json against what the hardware can physically do.
+
+    Distinct from the board diff above, which compares parameters. This finds maps that
+    cannot work no matter what the parameters say: a servo sharing a timer with an ESC,
+    or a mixer slot the config leaves for the firmware to place, which lands it on a low
+    channel at boot and takes that whole timer group into DShot.
+    """
+    try:
+        from server import config as vconfig
+        cfg = vconfig.load()
+    except Exception as exc:                                         # pragma: no cover
+        print(f"\nCould not check the output map: {exc}")
+        return
+
+    print("\nOutput map (vector.json against the board's timer groups)")
+    print(board.summary(cfg))
+
+    problems = board.check_output_map(cfg)
+    if not problems:
+        print("\n  Every group is single-mode and every mixer slot is placed.")
+        return
+    print()
+    for problem in problems:
+        print(f"  [{problem.severity.upper()}] S{problem.channel}: {problem.text}")
+
+
+def report_directions() -> None:
+    """
+    Check the recorded rotation directions against the frame's mixer table.
+
+    Unlike everything else here this compares the config to the firmware, not to the
+    board: the flight controller has no opinion on which way a propeller turns. It is
+    reported here because this is where people look, and because a wrong direction is
+    silent on the bench -- the motor spins, it just subtracts from yaw authority and its
+    coaxial partner no longer cancels its torque.
+    """
+    try:
+        from server import config as vconfig
+        from server import frames
+        cfg = vconfig.load()
+    except Exception as exc:                                         # pragma: no cover
+        print(f"\nCould not check rotation directions: {exc}")
+        return
+
+    frame = (cfg.raw.get("vehicle") or {}).get("frame") or {}
+    slots = frames.table(frame.get("frame_class"), frame.get("frame_type"))
+    print("\nRotation direction (vector.json against the frame's mixer table)")
+    if slots is None:
+        print("  Unknown frame, so the required directions cannot be established.")
+        return
+
+    wrong = []
+    for arm in cfg.live_arms():
+        for name, motor in arm.motors.items():
+            if motor.function is None or motor.channel < 1:
+                continue
+            slot = slots.get(motor.function - 32)
+            if slot is not None and slot.spin != motor.spin:
+                wrong.append(
+                    f"  {arm.id}.{name:7} S{motor.channel:<3} Motor{slot.number}  "
+                    f"recorded {motor.spin:4} frame wants {slot.spin}"
+                )
+    if not wrong:
+        print("  Every live motor is recorded turning the way the frame wants.")
+        return
+    print("\n".join(wrong))
+    print("  Flip `reversed` on those motors and reboot. If the recorded direction is")
+    print("  stale, establish it with Vector/tools/motor-direction.py.")
 
 
 def show(title: str, values: Dict[str, Optional[float]], names) -> None:
@@ -202,11 +280,25 @@ def main() -> int:
         for n in range(1, CHANNELS + 1)
         for suffix in ("FUNCTION", "MIN", "MAX", "TRIM", "REVERSED")
     ]
-    values = fetch_params(conn, FRAME + SAFETY + DSHOT + per_channel)
+    values = fetch_params(conn, FRAME + SAFETY + DSHOT + CAN + per_channel)
 
     show("Frame", values, FRAME)
     show("Safety", values, SAFETY)
     show("DShot", values, DSHOT)
+    show("CAN (DroneCAN PWM expander)", values, CAN)
+    esc_bm = values.get("CAN_D1_UC_ESC_BM")
+    if esc_bm is not None and int(esc_bm) == 0:
+        print("  CAN_D1_UC_ESC_BM is 0 -- the CAN-to-PWM node is never sent an ESC")
+        print("  command, so South and West motors cannot turn. Re-apply output mapping.")
+    esc_of = values.get("CAN_D1_UC_ESC_OF")
+    if esc_of is not None and int(esc_of) != board.CAN_ESC_OFFSET:
+        print(f"  CAN_D1_UC_ESC_OF is {int(esc_of)}, expected {board.CAN_ESC_OFFSET}: the")
+        print("  node's outputs answer the wrong RawCommand slots. Re-apply output mapping.")
+    print("  Note: a CAN ESC receives zero unless the vehicle is soft-armed. On the bench")
+    print("  only the motor test soft-arms, so the dashboard spins those one at a time.")
+    protocol = values.get("CAN_D1_PROTOCOL")
+    if protocol is not None and int(protocol) != 1:
+        print("  CAN_D1_PROTOCOL is not DroneCAN (1). The expander needs that, then a reboot.")
 
     # The gimbal needs the full 500-2500 window. SERVOn_MIN/MAX clamp DO_SET_SERVO, so
     # a default 1000-2000 output silently throws away the outer half of the travel.
@@ -259,6 +351,8 @@ def main() -> int:
     print("that motor has no output at all.")
 
     report_config_diff(values)
+    report_output_map()
+    report_directions()
 
     # Live output values prove whether anything is actually reaching the pins.
     print("\nWaiting for SERVO_OUTPUT_RAW...")

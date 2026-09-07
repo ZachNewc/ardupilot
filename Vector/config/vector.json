@@ -51,23 +51,23 @@
       "azimuth_deg": 0,
       "mount_yaw_deg": 0,
       "outer": {
-        "channel": 2
+        "channel": 8
       },
       "inner": {
-        "channel": 1
+        "channel": 7
       },
       "motors": {
         "bottom": {
-          "channel": 7,
-          "spin": "ccw",
-          "reversed": true,
+          "channel": 5,
+          "spin": "cw",
+          "reversed": false,
           "test_sequence": 1,
           "function": 33
         },
         "top": {
-          "channel": 8,
-          "spin": "ccw",
-          "reversed": true,
+          "channel": 6,
+          "spin": "cw",
+          "reversed": false,
           "test_sequence": 2,
           "function": 38
         }
@@ -76,27 +76,27 @@
     {
       "id": "east",
       "label": "East",
-      "status": "planned",
+      "status": "live",
       "azimuth_deg": 90,
       "mount_yaw_deg": 90,
       "outer": {
-        "channel": 14
+        "channel": 2
       },
       "inner": {
-        "channel": 15
+        "channel": 1
       },
       "motors": {
         "bottom": {
-          "channel": 9,
+          "channel": 15,
           "spin": "ccw",
           "reversed": false,
           "test_sequence": 4,
           "function": 39
         },
         "top": {
-          "channel": 10,
+          "channel": 14,
           "spin": "cw",
-          "reversed": true,
+          "reversed": false,
           "test_sequence": 3,
           "function": 36
         }
@@ -109,23 +109,23 @@
       "azimuth_deg": 180,
       "mount_yaw_deg": 180,
       "outer": {
-        "channel": 11
+        "channel": 10
       },
       "inner": {
-        "channel": 12
+        "channel": 9
       },
       "motors": {
         "bottom": {
-          "channel": 6,
+          "channel": 16,
           "spin": "ccw",
           "reversed": false,
           "test_sequence": 5,
           "function": 35
         },
         "top": {
-          "channel": 5,
+          "channel": 17,
           "spin": "cw",
-          "reversed": true,
+          "reversed": false,
           "test_sequence": 6,
           "function": 40
         }
@@ -134,14 +134,14 @@
     {
       "id": "west",
       "label": "West",
-      "status": "planned",
+      "status": "live",
       "azimuth_deg": 270,
       "mount_yaw_deg": 270,
       "outer": {
-        "channel": 18
+        "channel": 12
       },
       "inner": {
-        "channel": 19
+        "channel": 11
       },
       "motors": {
         "bottom": {
@@ -154,7 +154,7 @@
         "top": {
           "channel": 3,
           "spin": "cw",
-          "reversed": true,
+          "reversed": false,
           "test_sequence": 7,
           "function": 34
         }
@@ -164,11 +164,14 @@
   "link": {
     "device": "/dev/ttyACM0",
     "baud": 115200,
-    "esc_telemetry_serial": 6
+    "esc_telemetry_serials": [
+      4,
+      6
+    ]
   },
   "bench_limits": {
-    "motor_percent": 7,
-    "motor_seconds": 15,
+    "motor_percent": 30,
+    "motor_seconds": 30,
     "servo_speed_deg_s": 180,
     "default_servo_speed_deg_s": 45,
     "command_rate_hz": 25

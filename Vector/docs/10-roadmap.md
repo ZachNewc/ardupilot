@@ -5,17 +5,17 @@
 | Item | State |
 |---|---|
 | North arm | Built, wired |
-| South arm | Built, wired. Servos moved to S11/S12 so TIM5 carries motors only |
-| East / West arms | Not built. Described in the config as `planned` |
+| South arm | Built, wired. Servos on S9/S10 (TIM4 with East) |
+| East / West arms | `live` in the config. South and West motors on the CAN-to-PWM node, S14–S17 |
 | Gimbal kinematics | Derived, implemented, tested in two languages |
 | Dashboard | Complete as a bench tool |
 | Documentation | This set |
-| Flight firmware | **Not started.** Tree is unmodified ArduPilot |
+| Flight firmware | Mixer not started. `AP_BLHeli` now reads every ESC-telemetry UART |
 | SITL model | Not started |
 
 ## Verified on hardware
 
-- ESC telemetry on RX4, `SERIAL6_PROTOCOL` 16
+- ESC telemetry on RX4, `SERIAL6_PROTOCOL` 16 (single UART; both RX3 and RX4 are now configured)
 - DShot600 with a reversed top motor via BLHeli passthrough
 - `MAV_CMD_DO_MOTOR_TEST` sequences 1 and 3 under QUAD / X (North, on the previous S3/S4 wiring)
 
@@ -40,22 +40,21 @@ The [bench testing](08-bench-testing.md) procedures establish all of these.
 
 ## Open decisions
 
-### Servo output allocation
+### Output allocation
 
-Now decided for the onboard outputs, and the timer groups are clean: servos on TIM8
-(S1, S2) and TIM15 (S11, S12), motors on TIM4 (S7–S10) and TIM5 (S3–S6). All eight ESC
-signals fit the two DShot groups, so no future arm forces an earlier one to be rewired.
-
-That accounts for four servos. East and West still need four more, and the controller has
-only S13 left, so they remain on the CAN-to-PWM board.
+Decided. All eight servos are on the controller — TIM5 (S3–S6) and TIM4 (S7–S10) —
+and the two PWM-only pairs carry North's motors (S1/S2, TIM8) and East's (S11/S12,
+TIM15). South and West ESCs sit behind the CAN-to-PWM node on S14–S17. Recorded in
+[Hardware](02-hardware.md).
 
 | Option | Trade-off |
 |---|---|
-| Four on the controller, four on CAN | What is planned. Uses existing hardware. Two gimbals respond on a different path from the others |
-| All eight servos on CAN-to-PWM | Uniform timing across gimbals. Adds a CAN dependency to every gimbal, and wastes four working outputs |
+| Servos onboard, four motors on CAN | **Chosen.** Every gimbal on a local timer. Two arms' ESCs need the node, only spin under the motor test, and cannot be reversed from the flight controller |
+| Four servos on CAN, all motors onboard | Every ESC on DShot with reverse from the controller. Two gimbals respond on a different path from the others |
 
-Recorded in [Hardware](02-hardware.md). The only place the decision has to land is the
-channel numbers in `vector.json`.
+Recorded in [Hardware](02-hardware.md); the channel numbers are in `vector.json`. The
+cost of the chosen layout is entirely on the CAN motors: direction is set at the ESC,
+and the bench cannot spin them together with the rest.
 
 ### Yaw blend
 
@@ -80,7 +79,7 @@ under position control only. Affects how the vehicle behaves in manually-flown m
 
 ### 1. Re-establish the outputs, then prove both arms
 
-The frame moved to OCTAQUAD / PLUS and South's servos moved to S11/S12, so every motor
+The frame moved to OCTAQUAD / PLUS and East's motors sit on S11/S12, so every motor
 number changed meaning and no earlier bench result carries over. Set `FRAME_CLASS` 4 and
 `FRAME_TYPE` 0, reboot, then confirm with `Vector/tools/fc-report.py` that the board and
 `vector.json` agree before touching a motor.
@@ -89,7 +88,8 @@ Then run the bench sequence on both arms, props off: centres, signs, envelope, a
 physical motor each test order actually spins.
 
 East (90° mount yaw) is still the first real test of the mount-yaw transform on a
-third arm. Change required once it is built: `status` from `planned` to `live`.
+third arm. South and West motors are the first thing that has to work through the CAN
+node rather than a local timer.
 
 ### 2. SITL frame model
 

@@ -21,15 +21,45 @@ function Get-UsbipdState {
 
 Write-Host '=== Vector USB reset ==='
 
+function Get-DeviceParent([string]$InstanceId) {
+    $prop = Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue
+    if ($prop) { return [string]$prop.Data }
+    return $null
+}
+
+function Cycle-PnpDevice([string]$InstanceId, [string]$Label) {
+    if (-not $InstanceId) { return }
+    Write-Host "Cycling $Label : $InstanceId"
+    try { Disable-PnpDevice -InstanceId $InstanceId -Confirm:$false -ErrorAction Stop } catch {}
+    Start-Sleep -Seconds 2
+    try { Enable-PnpDevice -InstanceId $InstanceId -Confirm:$false -ErrorAction Stop } catch {}
+}
+
+# Drop usbipd's persisted "Descriptor Request Failed" bind. That ghost keeps the
+# next plug from coming up as ArduPilot on a free busid.
+$state = Get-UsbipdState
+foreach ($device in $state.Devices) {
+    $description = [string]$device.Description
+    $guid = [string]$device.PersistedGuid
+    if (-not $guid) { continue }
+    if ($description -like '*Descriptor Request Failed*') {
+        Write-Host "Unbinding persisted failed descriptor $guid"
+        & $Usbipd unbind --guid $guid 2>&1 | Out-Host
+    }
+}
+
 # 1) Remove "Device Descriptor Request Failed" ghosts. Until these are gone Windows
 #    will not re-enumerate the board as VID_1209/PID_5740 on the next plug.
-$failed = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+$failed = @(Get-PnpDevice -ErrorAction SilentlyContinue |
     Where-Object { $_.FriendlyName -like '*Descriptor Request Failed*' })
 
+$parents = New-Object System.Collections.Generic.HashSet[string]
 if ($failed.Count -eq 0) {
     Write-Host 'No failed USB descriptors present.'
 } else {
     foreach ($device in $failed) {
+        $parent = Get-DeviceParent $device.InstanceId
+        if ($parent) { [void]$parents.Add($parent) }
         Write-Host "Removing failed device: $($device.InstanceId)"
         try {
             Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
@@ -37,10 +67,17 @@ if ($failed.Count -eq 0) {
         Start-Sleep -Milliseconds 500
         pnputil /remove-device "$($device.InstanceId)" 2>&1 | Out-Host
     }
-    Write-Host 'Rescanning PnP...'
-    pnputil /scan-devices 2>&1 | Out-Host
-    Start-Sleep -Seconds 3
 }
+
+# Software unplug: bounce the hub port the failed device was on. That is what
+# a cable yank does, without waiting on a physical replug.
+foreach ($parent in $parents) {
+    Cycle-PnpDevice $parent 'USB hub'
+}
+
+Write-Host 'Rescanning PnP...'
+pnputil /scan-devices 2>&1 | Out-Host
+Start-Sleep -Seconds 3
 
 # 2) If the board is healthy now, share and attach it.
 $state = Get-UsbipdState
@@ -82,7 +119,11 @@ foreach ($device in $state.Devices) {
         break
     }
 }
-if (-not $stuck) { $stuck = '2-5' }
+if (-not $stuck) {
+    Write-Host 'No healthy device and no stuck busid to share. Unplug and replug the cable.'
+    & $Usbipd list
+    exit 3
+}
 
 Write-Host "No healthy device yet. Sharing busid $stuck for replug auto-attach..."
 & $Usbipd bind --busid $stuck 2>&1 | Out-Host

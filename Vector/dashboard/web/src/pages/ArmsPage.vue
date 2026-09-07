@@ -140,19 +140,47 @@ const motorPercent = ref(5)
 const motorSeconds = ref(2)
 const motorPick = ref<Record<MotorName, boolean>>({ bottom: false, top: false })
 
+/** Motor1..Motor8 are SERVOn_FUNCTION 33..40. */
+const FUNC_MOTOR_FIRST = 33
+
 const limits = computed(() => store.config?.benchLimits ?? null)
 
 const pickedMotors = computed(() =>
   (Object.keys(motorPick.value) as MotorName[]).filter((name) => motorPick.value[name]),
 )
 
-/** Motors without a test_sequence cannot be addressed, so say so instead of failing later. */
+/**
+ * How many motors a click actually spins.
+ *
+ * The tick boxes name roles, not motors, so "All live arms" with both ticked is four
+ * propellers rather than two. They all start together now, which is a number worth
+ * being honest about before pressing the button.
+ */
+const spinCount = computed(() => {
+  const targeted = selection.value === ALL ? liveArms.value.length : focus.value?.live ? 1 : 0
+  return targeted * pickedMotors.value.length
+})
+
+/**
+ * The motor function for one role on the focused arm, or null if it has none.
+ *
+ * Spinning force-arms the mixer, so `function` -- not `test_sequence` -- is
+ * what decides whether a motor can be driven and handed back afterwards.
+ */
+function motorFunction(name: MotorName): number | null {
+  return focusConfig.value?.motors?.[name]?.function ?? null
+}
+
+function motorFunctionLabel(name: MotorName): string {
+  const fn = motorFunction(name)
+  return fn === null ? 'unset' : `M${fn - FUNC_MOTOR_FIRST + 1}`
+}
+
+/** Motors with no function cannot be addressed, so say so instead of failing later. */
 const unmapped = computed(() => {
   const arm = focusConfig.value
   if (!arm) return []
-  return (Object.entries(arm.motors) as [MotorName, { testSequence: number | null }][])
-    .filter(([, motor]) => motor.testSequence === null)
-    .map(([name]) => name)
+  return (Object.keys(arm.motors) as MotorName[]).filter((name) => motorFunction(name) === null)
 })
 
 function spin() {
@@ -380,7 +408,7 @@ function spin() {
       <!-- motors -->
       <PanelCard
         title="Motors"
-        note="Bounded test spins. Clear the props, or take them off."
+        note="Selected motors are latched one after another through the motor test, then held together. A click can take a second to bring the whole set up. Clear the props, or take them off."
         :accent="accent"
       >
         <template #actions>
@@ -392,7 +420,7 @@ function spin() {
         <div class="stack">
           <div class="motor-table">
             <div class="motor-row head">
-              <span>Motor</span><span>Spin</span><span class="r">Ch</span><span class="r">Seq</span
+              <span>Motor</span><span>Spin</span><span class="r">Ch</span><span class="r">Fn</span
               ><span class="r">RPM</span>
             </div>
             <div v-for="(motor, name) in focus?.motors ?? {}" :key="name" class="motor-row">
@@ -400,15 +428,15 @@ function spin() {
                 <input
                   type="checkbox"
                   :checked="motorPick[name as MotorName]"
-                  :disabled="disabled || motor?.testSequence === null"
+                  :disabled="disabled || motorFunction(name as MotorName) === null"
                   @change="motorPick[name as MotorName] = ($event.target as HTMLInputElement).checked"
                 />
                 {{ name }}
               </label>
               <span class="faint">{{ motor?.spin }}{{ motor?.reversed ? ' rev' : '' }}</span>
               <span class="r mono">{{ motor?.channel }}</span>
-              <span class="r mono" :class="{ danger: motor?.testSequence === null }">
-                {{ motor?.testSequence ?? 'unset' }}
+              <span class="r mono" :class="{ danger: motorFunction(name as MotorName) === null }">
+                {{ motorFunctionLabel(name as MotorName) }}
               </span>
               <span class="r mono">{{ motor?.rpm !== null ? num(motor?.rpm, 0) : '--' }}</span>
             </div>
@@ -416,10 +444,10 @@ function spin() {
 
           <p v-if="unmapped.length" class="warn small">
             {{ unmapped.join(' and ') }} {{ unmapped.length > 1 ? 'have' : 'has' }} no
-            <code>test_sequence</code> in the config, so
-            {{ unmapped.length > 1 ? 'they cannot' : 'it cannot' }} be addressed. ArduPilot
-            numbers motors by frame test order; establish it once with Motor Test in a GCS,
-            then record it on the Setup page.
+            <code>function</code> in the config, so
+            {{ unmapped.length > 1 ? 'those outputs are' : 'that output is' }} Disabled and
+            emits nothing. Set <strong>fn</strong> for that motor on the Setup page, then
+            re-apply the output mapping.
           </p>
 
           <SliderRow
@@ -444,11 +472,11 @@ function spin() {
 
           <button
             class="primary"
-            :disabled="disabled || !pickedMotors.length || isPending('spin_motors')"
+            :disabled="disabled || !spinCount || isPending('spin_motors')"
             @click="spin"
           >
-            Spin {{ pickedMotors.length || 'no' }}
-            {{ pickedMotors.length === 1 ? 'motor' : 'motors' }}
+            Spin {{ spinCount || 'no' }}
+            {{ spinCount === 1 ? 'motor' : 'motors together' }}
             at {{ motorPercent }}% for {{ motorSeconds }}s
           </button>
         </div>

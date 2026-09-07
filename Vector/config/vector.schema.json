@@ -79,8 +79,8 @@
       "properties": {
         "channel": {
           "type": "integer",
-          "description": "Output channel. Above the controller's own output count means the CAN-to-PWM board.",
-          "minimum": 1,
+          "description": "Output channel. 0 disables this axis: nothing is written to the flight controller and the pin is free for something else. 1-32 are SERVO1..SERVO32; above the controller's own output count means the CAN-to-PWM board, whose first output is channel 14.",
+          "minimum": 0,
           "maximum": 32
         },
         "sign": {
@@ -144,15 +144,20 @@
       "required": ["channel"],
       "additionalProperties": false,
       "properties": {
-        "channel": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "channel": {
+          "type": "integer",
+          "description": "Output channel, 1-32 for SERVO1..SERVO32; 14 and up are the CAN-to-PWM node's outputs (14 is its first), driven as DroneCAN ESC commands. 0 does NOT free the pin: an unplaced mixer slot is placed by ArduPilot at boot, which puts MotorN on SERVO(N), turns that output into a DShot ESC pin, and takes its whole timer group into DShot with it. Give every motor an explicit channel on a group that carries only motors.",
+          "minimum": 0,
+          "maximum": 32
+        },
         "spin": {
           "type": "string",
-          "description": "Rotation direction, for display and prop-fitting checks.",
+          "description": "The direction this propeller was OBSERVED to turn, seen from above the vehicle. Never written to the flight controller: editing this changes nothing on the drone. It records what the ESC actually does so the intended layout can be checked, and drives prop-fitting checks. To change a direction, edit `reversed` and reboot.",
           "enum": ["cw", "ccw"]
         },
         "reversed": {
           "type": "boolean",
-          "description": "Whether the ESC needs a DShot reverse command. Exactly one motor per coaxial pair should be reversed so both push up."
+          "description": "The only field that changes which way a propeller turns. Becomes a bit in SERVO_BLH_RVMASK, from which ArduPilot sends the DShot reverse command to that ESC. SERVO_BLH_RVMASK is @RebootRequired and the HAL only ORs into its reversed mask, so neither setting nor clearing this takes effect until the flight controller reboots. On a motor behind the CAN-to-PWM node the flight controller cannot apply this at all: it records the intent, and the direction has to be set in that ESC's own configuration or by swapping two motor wires."
         },
         "test_sequence": {
           "type": ["integer", "null"],
@@ -225,9 +230,15 @@
       "properties": {
         "device": { "type": "string", "examples": ["/dev/ttyACM0", "/dev/ttyUSB0"] },
         "baud": { "type": "integer", "exclusiveMinimum": 0 },
+        "esc_telemetry_serials": {
+          "type": "array",
+          "description": "SERIALn indexes that carry BLHeli T-wire telemetry. On the Matek H743-Wing, 4 is RX3 (USART3) and 6 is RX4 (UART4).",
+          "items": { "type": "integer", "minimum": 0 },
+          "uniqueItems": true
+        },
         "esc_telemetry_serial": {
           "type": ["integer", "null"],
-          "description": "Which SERIALn carries ESC telemetry, so the UI can name the right parameter. 6 (UART4) on the Matek H743-Wing.",
+          "description": "Legacy single-port form. Prefer esc_telemetry_serials.",
           "minimum": 0
         }
       }

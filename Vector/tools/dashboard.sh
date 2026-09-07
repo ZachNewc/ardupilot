@@ -6,7 +6,7 @@
 #
 # Prefer Vector/start.sh; this file is what it execs.
 #
-#   Vector/start.sh              # attach USB if needed, build, serve
+#   Vector/start.sh              # attach USB (Shared-not-Attached included), build, serve
 #   Vector/start.sh --no-usb     # skip the WSL USB step
 #   Vector/start.sh --dev        # Vite dev server alongside, hot reload
 #   PORT=9000 Vector/start.sh
@@ -35,14 +35,6 @@ for arg in "$@"; do
   esac
 done
 
-have_serial() {
-  local path
-  for path in /dev/ttyACM* /dev/ttyUSB*; do
-    [[ -e "$path" ]] && return 0
-  done
-  return 1
-}
-
 # ---------------------------------------------------------------- dependencies
 missing=()
 for module in serial pymavlink starlette uvicorn; do
@@ -56,11 +48,17 @@ if ((${#missing[@]})); then
 fi
 
 # ------------------------------------------------------------------------- USB
-if ((want_usb)) && ! have_serial; then
+# Always run this on WSL. A leftover /dev/ttyACM* after RST is not a working
+# link — the board is often still Shared on Windows and not Attached here.
+if ((want_usb)); then
   if [[ -x "$TOOLS/wsl-usb.sh" ]]; then
-    "$TOOLS/wsl-usb.sh" || echo "USB attach did not succeed; starting anyway."
+    if ! "$TOOLS/wsl-usb.sh"; then
+      echo "USB is not ready. Fix the attach, or start with --no-usb to skip." >&2
+      exit 1
+    fi
   else
-    echo "No serial device found. Attach the flight controller, then reconnect from the UI."
+    echo "No USB helper at $TOOLS/wsl-usb.sh" >&2
+    exit 1
   fi
 fi
 

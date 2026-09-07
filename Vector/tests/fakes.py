@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "Vector", "dashboard"))
@@ -37,6 +37,9 @@ class FakeLink:
         self.motor_tests: List[Tuple[int, float, float]] = []
         self.errors: List[str] = []
         self.stream_requests = 0
+        self.armed_ops: List[str] = []
+        self.modes: List[str] = []
+        self.rc_overrides: List[Tuple[int, ...]] = []
         self._pwm: Dict[int, int] = {}
         self._telemetry = Telemetry(connected=connected)
 
@@ -78,6 +81,10 @@ class FakeLink:
 
     def set_servo_function(self, channel: int, function: float) -> None:
         self.functions[channel] = function
+        # The board echoes a PARAM_VALUE for every PARAM_SET, which is what makes a
+        # read-back after a write meaningful. Modelled here so code that confirms its
+        # writes is exercised rather than skipped.
+        self.params[f"SERVO{channel}_FUNCTION"] = function
 
     def forget_servo_functions(self) -> None:
         self.functions.clear()
@@ -90,6 +97,26 @@ class FakeLink:
 
     def motor_test(self, sequence: int, percent: float, seconds: float) -> None:
         self.motor_tests.append((sequence, percent, seconds))
+
+    def set_mode_stabilize(self) -> None:
+        self.modes.append("STABILIZE")
+
+    def set_rc_override(self, channels: Sequence[int]) -> None:
+        self.rc_overrides.append(tuple(int(v) for v in channels))
+
+    def clear_rc_override(self) -> None:
+        self.set_rc_override((0, 0, 0, 0, 0, 0, 0, 0))
+
+    def force_arm(self) -> None:
+        self.armed_ops.append("arm")
+        self._telemetry.armed = True
+
+    def force_disarm(self) -> None:
+        self.armed_ops.append("disarm")
+        self._telemetry.armed = False
+
+    def wait_armed(self, want: bool, timeout: float = 3.0) -> bool:
+        return self._telemetry.armed == want
 
     # -- events --------------------------------------------------------
     def note(self, message: str) -> str:

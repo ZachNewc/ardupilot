@@ -10,13 +10,15 @@ Vector/start.sh
 ```
 
 Then open <http://localhost:8765>. The script checks Python dependencies, attaches the
-USB device if this is WSL and nothing is present, builds the web app if it is stale, and
-serves. `Vector/start.sh` is a thin wrapper around `Vector/tools/dashboard.sh`; either
-works.
+flight controller over usbipd on WSL (including Shared-but-not-Attached after a
+reboot — a leftover `/dev/ttyACM*` is not treated as success), builds the web app if
+it is stale, and serves. `Vector/start.sh` is a thin wrapper around
+`Vector/tools/dashboard.sh`; either works. It exits if USB cannot be recovered;
+use `--no-usb` to skip that.
 
 | Command | Effect |
 |---|---|
-| `Vector/start.sh` | Attach USB if needed, build if stale, serve |
+| `Vector/start.sh` | Attach USB (recover Shared-not-Attached), build if stale, serve |
 | `Vector/start.sh --no-usb` | Skip the WSL USB step |
 | `Vector/start.sh --dev` | Vite dev server alongside, hot reload |
 | `PORT=9000 Vector/start.sh` | Serve on a different port |
@@ -151,8 +153,9 @@ The main working page. Per arm, or all arms together:
 - **Axis sliders** — drive one gimbal axis directly, in geometric degrees.
 - **Kinematics readout** — commanded tilt, resulting servo angle, pulse width, and
   whether an axis is at its limit.
-- **Motor test** — bounded by `bench_limits`, and refused for any motor whose
-  `test_sequence` is unset.
+- **Motor test** — every ticked motor on every selected arm spins together, at one
+  throttle for one duration. Bounded by `bench_limits`, refused for any motor whose
+  `function` is unset, and refused entirely while the vehicle is armed.
 
 Planned arms are shown but not commandable.
 
@@ -199,8 +202,13 @@ adding an arm to the config makes it appear here too.
 ### Setup
 
 Edits `vector.json` from the browser: arm list, channel map, servo centring, limits,
-signs. The document is validated before anything is written, so a bad edit leaves the
-file on disk untouched.
+signs. Channel **0** disables that output — the pin is unclaimed and nothing is written
+to the flight controller. The document is validated before anything is written, so a
+bad edit leaves the file on disk untouched.
+
+Mapping debug drives one SERVO pin as a motor (1 s at the bench throttle cap) or as a
+servo (deflect, then centre). It names the pin, not the arm, which is how a wrong
+channel shows up instead of a guess.
 
 The page edits a copy of the raw on-disk document rather than the camelCase view the
 rest of the UI reads, so keys the UI does not model survive a round trip instead of
@@ -267,7 +275,8 @@ A sign flip cannot land in one language only.
 | Two features want the servos | Arbiter grants one; the loser stops immediately |
 | Stop pressed | Takes ownership, centres everything, cancels motor tests |
 | Motor test | Bounded in percent and seconds by `bench_limits` |
-| Unset `test_sequence` | That motor cannot be spun at all |
+| Unset `function` | That output is Disabled, so that motor cannot be spun at all |
+| Vehicle armed | Spinning is refused; the mixer owns the outputs |
 
 The controls that matter — Stop and Center — sit in the top bar on every page, not
 buried in whichever page happens to be open.

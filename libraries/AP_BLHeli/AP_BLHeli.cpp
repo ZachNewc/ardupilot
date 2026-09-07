@@ -172,6 +172,8 @@ AP_BLHeli::AP_BLHeli(void)
     AP_Param::setup_object_defaults(this, var_info);
     _singleton = this;
     last_control_port = -1;
+    num_telem_uarts = 0;
+    telem_uart = nullptr;
 }
 
 // map an incoming BLHeli motor request to the appropriate 
@@ -1512,7 +1514,22 @@ void AP_BLHeli::init(uint32_t mask, AP_HAL::RCOutput::output_mode otype)
     if (num_motors != 0 && telem_rate > 0) {
         AP_SerialManager *serial_manager = AP_SerialManager::get_singleton();
         if (serial_manager) {
-            telem_uart = serial_manager->find_serial(AP_SerialManager::SerialProtocol_ESCTelemetry,0);
+            num_telem_uarts = 0;
+            telem_uart = nullptr;
+            for (uint8_t i = 0; i < max_telem_uarts; i++) {
+                telem_uarts[i] = nullptr;
+                telem_uart_started[i] = false;
+                last_telem_byte_read_us[i] = 0;
+                AP_HAL::UARTDriver *u = serial_manager->find_serial(AP_SerialManager::SerialProtocol_ESCTelemetry, i);
+                if (u == nullptr) {
+                    break;
+                }
+                telem_uarts[num_telem_uarts] = u;
+                num_telem_uarts++;
+            }
+            if (num_telem_uarts > 0) {
+                telem_uart = telem_uarts[0];
+            }
         }
     }
 }
@@ -1520,11 +1537,11 @@ void AP_BLHeli::init(uint32_t mask, AP_HAL::RCOutput::output_mode otype)
 /*
   read an ESC telemetry packet
  */
-void AP_BLHeli::read_telemetry_packet(void)
+void AP_BLHeli::read_telemetry_packet(AP_HAL::UARTDriver *uart)
 {
 #if HAL_WITH_ESC_TELEM
     uint8_t buf[telem_packet_size];
-    if (telem_uart->read(buf, telem_packet_size) < telem_packet_size) {
+    if (uart->read(buf, telem_packet_size) < telem_packet_size) {
         // short read, we should have 10 bytes ready when this function is called
         return;
     }
@@ -1619,6 +1636,53 @@ void AP_BLHeli::log_bidir_telemetry(void)
 }
 
 /*
+  consume one ESC telemetry UART. Each protocol-16 serial port can
+  carry a separate T-wire bus; only the ESC we last requested replies.
+ */
+void AP_BLHeli::read_telem_uart(uint8_t idx, uint32_t now)
+{
+    AP_HAL::UARTDriver *uart = telem_uarts[idx];
+    if (uart == nullptr) {
+        return;
+    }
+    if (!telem_uart_started[idx] || !uart->is_owned_by_current_thread()) {
+        // we need to use begin() here to ensure the correct thread owns the uart
+        uart->begin(115200);
+        telem_uart_started[idx] = true;
+    }
+
+    uint32_t nbytes = uart->available();
+
+    if (nbytes > telem_packet_size) {
+        // if we have more than 10 bytes then we don't know which ESC
+        // they are from. Throw them all away
+        uart->discard_input();
+        return;
+    }
+    if (nbytes > 0 &&
+        nbytes < telem_packet_size &&
+        (last_telem_byte_read_us[idx] == 0 ||
+         now - last_telem_byte_read_us[idx] < 1000)) {
+        // wait a bit longer, we don't have enough bytes yet
+        if (last_telem_byte_read_us[idx] == 0) {
+            last_telem_byte_read_us[idx] = now;
+        }
+        return;
+    }
+    if (nbytes > 0 && nbytes < telem_packet_size) {
+        // we've waited long enough, discard bytes if we don't have 10 yet
+        uart->discard_input();
+        last_telem_byte_read_us[idx] = 0;
+        return;
+    }
+    if (nbytes == telem_packet_size) {
+        // we have a full packet ready to parse
+        read_telemetry_packet(uart);
+        last_telem_byte_read_us[idx] = 0;
+    }
+}
+
+/*
   update BLHeli telemetry handling
   This is called on push() in SRV_Channels
  */
@@ -1626,11 +1690,11 @@ void AP_BLHeli::update_telemetry(void)
 {
 #ifdef HAL_WITH_BIDIR_DSHOT
     // we might only have bi-dir dshot
-    if (channel_bidir_dshot_mask.get() != 0 && !telem_uart) {
+    if (channel_bidir_dshot_mask.get() != 0 && num_telem_uarts == 0) {
         log_bidir_telemetry();
     }
 #endif
-    if (!telem_uart || !SRV_Channels::have_digital_outputs()) {
+    if (num_telem_uarts == 0 || !SRV_Channels::have_digital_outputs()) {
         return;
     }
     uint32_t now = AP_HAL::micros();
@@ -1639,39 +1703,8 @@ void AP_BLHeli::update_telemetry(void)
         // make sure we have a gap between frames
         telem_rate_us = 2000;
     }
-    if (!telem_uart_started || !telem_uart->is_owned_by_current_thread()) {
-        // we need to use begin() here to ensure the correct thread owns the uart
-        telem_uart->begin(115200);
-        telem_uart_started = true;
-    }
-
-    uint32_t nbytes = telem_uart->available();
-
-    if (nbytes > telem_packet_size) {
-        // if we have more than 10 bytes then we don't know which ESC
-        // they are from. Throw them all away
-        telem_uart->discard_input();
-        return;
-    }
-    if (nbytes > 0 &&
-        nbytes < telem_packet_size &&
-        (last_telem_byte_read_us == 0 ||
-         now - last_telem_byte_read_us < 1000)) {
-        // wait a bit longer, we don't have enough bytes yet
-        if (last_telem_byte_read_us == 0) {
-            last_telem_byte_read_us = now;
-        }
-        return;
-    }
-    if (nbytes > 0 && nbytes < telem_packet_size) {
-        // we've waited long enough, discard bytes if we don't have 10 yet
-        telem_uart->discard_input();
-        return;
-    }
-    if (nbytes == telem_packet_size) {
-        // we have a full packet ready to parse
-        read_telemetry_packet();
-        last_telem_byte_read_us = 0;
+    for (uint8_t i = 0; i < num_telem_uarts; i++) {
+        read_telem_uart(i, now);
     }
     // we need to keep requesting telemetry even if we don't receive anything
     // as the request mask will be reset next cycle.

@@ -18,6 +18,7 @@ import glob
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from . import board
 from . import config as vconfig
 from . import kinematics as kin
 from .bench import Bench
@@ -184,6 +185,11 @@ def cmd_stop_motors(session: Session, msg: Dict[str, Any]) -> str:
     return session.bench.stop_motors()
 
 
+def cmd_probe_output(session: Session, msg: Dict[str, Any]) -> str:
+    """Drive one SERVO pin as a motor or a servo so a mapping can be confirmed by eye."""
+    return session.bench.probe_output(int(_float(msg, "channel")), _str(msg, "kind"))
+
+
 # ----------------------------------------------------------------------------
 # levelling controller
 # ----------------------------------------------------------------------------
@@ -223,6 +229,7 @@ def cmd_get_config(session: Session, msg: Dict[str, Any]) -> Dict[str, Any]:
             "workspaces": {
                 arm.id: kin.workspace_payload(arm) for arm in session.bench.config.arms
             },
+            "outputMap": board.payload(session.bench.config),
             # The document exactly as it sits on disk. The Setup page edits a copy of
             # this and submits fragments of it, so keys the UI does not know about
             # survive a round trip instead of being silently dropped.
@@ -279,6 +286,7 @@ COMMANDS: Dict[str, Command] = {
         Command("center", cmd_center, True, "Return gimbals to zero tilt"),
         Command("spin_motors", cmd_spin_motors, True, "Run a bounded motor test"),
         Command("stop_motors", cmd_stop_motors, True, "Cancel any running motor test"),
+        Command("probe_output", cmd_probe_output, True, "Spin or sweep one SERVO pin to confirm the wiring"),
         Command("level", cmd_level, False, "Start, stop or retune the levelling demo"),
         Command("get_config", cmd_get_config, False, "Send the vehicle config and derived geometry"),
         Command("save_config", cmd_save_config, False, "Validate and persist a config edit"),

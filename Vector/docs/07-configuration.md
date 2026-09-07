@@ -34,7 +34,8 @@ Start with `status: "planned"`. The dashboard will show the arm but refuse to co
 it, so a typo in a channel number cannot drive an output that belongs to something else.
 Promote to `"live"` once the wiring is verified.
 
-Loading fails outright if two entries claim the same output channel. Two outputs on one
+Loading fails outright if two entries claim the same output channel, except **channel 0**,
+which means unused and may be shared. Two real outputs on one
 pad would silently fight each other, so it is better to refuse than to start.
 
 ## Top level
@@ -86,7 +87,7 @@ on the outer ring would set it to 0 and need half the inner travel.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `channel` | int | Output channel, 1–32. Above the controller's own count means the CAN board |
+| `channel` | int | Output channel, 0–32. **0 disables the output.** 1–32 are SERVO1..SERVO32; above the controller's own count means the CAN board |
 | `sign` | ±1 | Direction. Absorbs which way the servo and linkage are mounted |
 | `center_us` | int | Pulse for zero servo angle |
 | `us_per_deg` | number | Pulse microseconds per servo degree |
@@ -148,15 +149,52 @@ means such a build is a config change, not a code change.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `channel` | int | Output channel |
-| `spin` | `cw`/`ccw` | Rotation direction, for reference and the UI |
-| `reversed` | bool | Whether the ESC needs a DShot reverse command |
+| `channel` | int | Output channel. **0 does not disable the motor — see below** |
+| `spin` | `cw`/`ccw` | The direction the propeller was **observed** to turn. Never written to the board |
+| `reversed` | bool | The only field that changes direction. Becomes a bit in `SERVO_BLH_RVMASK` — for a motor on the CAN node it is intent only; see [Firmware](05-firmware.md) |
 | `test_sequence` | int or null | The number `MAV_CMD_DO_MOTOR_TEST` expects |
+| `function` | int or null | `SERVOn_FUNCTION`: 33–40 for Motor1–Motor8. Also what the dashboard needs to spin the motor |
+
+### A motor `channel` of 0 gives the pin away
+
+On a gimbal axis, `channel: 0` means what it says: nothing is written, the pin is free.
+On a **motor** it does the opposite of what it looks like.
+
+The dashboard writes no `SERVOn_FUNCTION` for a motor with no channel, so no output
+claims that mixer slot. At the next boot `AP_Motors::add_motor_num` calls
+`SRV_Channels::set_aux_channel_default(function, motor_num)`, which places MotorN on
+SERVO(N) unless a channel already holds that function — and it treats
+`SERVOn_FUNCTION = 0` as unclaimed, because Disabled *is* `k_none`. The slot lands on a
+low output, that output becomes a DShot ESC pin, and its whole timer group goes into
+DShot with it. Any gimbal servo in that group stops moving.
+
+Setting all eight motors to `channel: 0` therefore does not free the board — it hands
+S1–S8 to the mixer and silences every servo outside TIM15. Give each motor slot an
+explicit channel on a group that carries only motors.
+
+The check for this lives in `Vector/dashboard/server/board.py`. It runs on every mapping
+assert, shows in Setup → **Output map**, and prints in `Vector/tools/fc-report.py`.
+
+### `spin` and `reversed` are not the same kind of field
+
+Editing `spin` changes nothing on the vehicle. It is a record of what the propeller was
+seen to do, kept so the intended layout can be checked against reality;
+`Vector/tools/motor-direction.py` fills it in and `Vector/tools/fc-report.py` reports
+where it disagrees with the frame.
+
+`reversed` is the control. It becomes a bit in `SERVO_BLH_RVMASK`, which is
+`@RebootRequired` — and the HAL only ORs into its internal reversed mask, so a *cleared*
+bit also survives until the next boot. **Changing `reversed` requires a reboot in both
+directions.** See [Firmware](05-firmware.md).
 
 `test_sequence` is **not** the output channel. ArduPilot addresses motors by their
 position in the frame's test order, which depends on `FRAME_CLASS` and `FRAME_TYPE`, so
-it cannot be derived and has to be recorded. `null` means not established, and the
-dashboard refuses to spin that motor — a wrong number spins an unexpected motor.
+it cannot be derived and has to be recorded. A wrong number spins an unexpected motor.
+
+It is needed by `Vector/tools/motor-direction.py` and by any other GCS's motor test, but
+not by the dashboard's Motors panel: that spins motors together, which `DO_MOTOR_TEST`
+cannot do, so it addresses output channels directly and needs `function` instead. A motor
+with no `function` is refused there.
 
 See [Firmware](05-firmware.md) for the values under OCTAQUAD / PLUS.
 
@@ -166,10 +204,11 @@ See [Firmware](05-firmware.md) for the values under OCTAQUAD / PLUS.
 |---|---|---|
 | `device` | string | Serial device, e.g. `/dev/ttyACM0` |
 | `baud` | int | 115200 for USB |
-| `esc_telemetry_serial` | int or null | Which `SERIALn` carries ESC telemetry. 6 on this board |
+| `esc_telemetry_serials` | list of int | Which `SERIALn` ports carry ESC telemetry. `[4, 6]` is RX3 and RX4 on this board |
 
-`esc_telemetry_serial` is used only to name the right parameter in the UI when nothing
-is reporting, which turns "no ESC data" into an actionable message.
+`esc_telemetry_serials` is asserted on connect (`SERIALn_PROTOCOL` = 16) and names
+the right parameters in the UI when nothing is reporting. A legacy
+`esc_telemetry_serial` integer still loads as a one-port list.
 
 ## `bench_limits`
 
@@ -236,7 +275,13 @@ Loading refuses a document that would produce a vehicle that cannot work:
 | `status` in the allowed set | A typo would otherwise read as not-live and be silently ignored |
 
 Errors name the exact path, for example
-`arms[1] (east).inner: channel 33 outside SERVO1..SERVO32`.
+`arms[1] (east).inner: channel 33 outside 0..SERVO32 (0 disables the output)`.
+
+These are refusals: the document does not load. A separate class of problem — a map that
+loads cleanly but that the *hardware* will not honour, such as a servo sharing a timer
+group with an ESC — is reported rather than refused, because it depends on the board
+rather than on the document. Setup → **Output map** lists those, and the dashboard
+repeats them whenever output mapping is asserted.
 
 ## Full current config
 
@@ -263,10 +308,11 @@ Errors name the exact path, for example
     "inner": { "sign":  1, "center_us": 1500, "us_per_deg": 11.11111,
                "servo_limit_deg": 90.0, "min_us": 500, "max_us": 2500, "trim_deg": 0.0 }
   },
-  "arms": [ "north (live, inner S1 / outer S2, motors S7/S8)",
-             "south (live, outer S11 / inner S12, motors S6/S5)",
-             "east", "west" ],
-  "link": { "device": "/dev/ttyACM0", "baud": 115200, "esc_telemetry_serial": 6 },
+  "arms": [ "north (live, inner S5 / outer S6, motors S2 lower / S1 upper)",
+             "east  (live, inner S7 / outer S8, motors S11 lower / S12 upper)",
+             "south (live, inner S9 / outer S10, motors S15 lower / S14 upper on CAN)",
+             "west  (live, inner S3 / outer S4, motors S17 lower / S16 upper on CAN)" ],
+  "link": { "device": "/dev/ttyACM0", "baud": 115200, "esc_telemetry_serials": [4, 6] },
   "bench_limits": { "motor_percent": 50.0, "motor_seconds": 10.0,
                     "servo_speed_deg_s": 180.0, "default_servo_speed_deg_s": 45.0,
                     "command_rate_hz": 25.0 },

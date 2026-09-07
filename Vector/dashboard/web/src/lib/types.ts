@@ -13,6 +13,7 @@ export type MotorName = 'bottom' | 'top'
 /* ---------------------------------------------------------------- config ---- */
 
 export interface AxisConfig {
+  /** SERVO1..SERVO32. 0 disables this axis: nothing is written to that pin. */
   channel: number
   sign: number
   centerUs: number
@@ -32,6 +33,7 @@ export interface GimbalConfig {
 }
 
 export interface MotorConfig {
+  /** SERVO1..SERVO32. 0 disables this motor: it is not spun and not mapped. */
   channel: number
   spin: 'cw' | 'ccw'
   reversed: boolean
@@ -97,18 +99,79 @@ export interface CommandInfo {
   summary: string
 }
 
+/* ------------------------------------------------------------ output map ---- */
+
+/** One pin, and whichever arm role claims it. */
+export interface OutputCell {
+  channel: number
+  owner: string | null
+  kind: 'servo' | 'motor' | null
+  /** Which output on the CAN-to-PWM node this is, counting from 1. CAN pins only. */
+  canOutput?: number
+  /**
+   * The `OUTx_FUNCTION` the node itself needs on that output. Set on the node, not the
+   * flight controller: 50 + channel for a servo, Motor(k+1) = 33 + k for an ESC in
+   * RawCommand slot k. CAN pins only.
+   */
+  nodeFunction?: number
+}
+
+/**
+ * One hardware timer and the pins it drives, or the CAN-to-PWM node.
+ *
+ * `mode` is not a setting. A timer group is all DShot or all PWM, so one motor in the
+ * group decides it for every pin in the group, and a servo in a DShot group is dead.
+ */
+export interface OutputGroup {
+  name: string
+  mode: 'DShot' | 'PWM' | 'CAN'
+  outputs: OutputCell[]
+}
+
+/** A channel map the hardware will not honour. `fatal` means that output cannot work. */
+export interface OutputProblem {
+  severity: 'fatal' | 'warning'
+  channel: number
+  text: string
+}
+
+export interface OutputMap {
+  groups: OutputGroup[]
+  problems: OutputProblem[]
+  boardPwmChannels: number
+  canServoFirst: number
+  /**
+   * Motor channels that leave the vehicle as DroneCAN ESC commands. A CAN ESC only
+   * takes throttle while the vehicle is soft-armed, so these spin through the motor
+   * test, one at a time, rather than together with the onboard set.
+   */
+  canEscChannels: number[]
+}
+
 export interface VehicleConfigMessage {
   name: string
   summary: string
   controller: string
   frame: FrameConfig
   arms: ArmConfig[]
-  link: { device: string; baud: number; escTelemetrySerial: number | null }
+  link: {
+    device: string
+    baud: number
+    escTelemetrySerials: number[]
+    escTelemetrySerial: number | null
+  }
   benchLimits: BenchLimits
   benchController: BenchControllerConfig
   path: string
   workspaces: Record<string, Workspace>
   commands: CommandInfo[]
+  /**
+   * What each physical output is, and every way the map disagrees with the board.
+   *
+   * Travels with the config rather than with telemetry: a map that cannot work is
+   * wrong before anything is connected, and Setup is where it gets edited.
+   */
+  outputMap: OutputMap
   /**
    * The config file exactly as it is on disk, in its native snake_case form.
    *

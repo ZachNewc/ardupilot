@@ -135,7 +135,8 @@ class KinematicsTest(unittest.TestCase):
 
     def test_channel_conflicts_are_rejected(self) -> None:
         broken = json.loads(json.dumps(self.cfg.raw))
-        broken["arms"][1]["outer"]["channel"] = broken["arms"][0]["outer"]["channel"]
+        broken["arms"][0]["outer"]["channel"] = 2
+        broken["arms"][1]["outer"]["channel"] = 2
         with self.assertRaisesRegex(vconfig.ConfigError, "claimed by both"):
             vconfig.from_dict(broken)
 

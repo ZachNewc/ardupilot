@@ -30,6 +30,17 @@ ARM_STATUS = ("live", "planned", "disabled")
 AXIS_NAMES = ("outer", "inner")
 MOTOR_NAMES = ("bottom", "top")
 
+# SERVO1..SERVO32. Channel 0 is the reserved "this output is unused" value: the
+# Setup page writes it to disable a pin without deleting the arm, and nothing
+# that talks to the flight controller may treat it as a real output.
+CHANNEL_MIN = 0
+CHANNEL_MAX = 32
+
+
+def channel_assigned(channel: int) -> bool:
+    """True when ``channel`` is a real SERVO output. 0 means unused."""
+    return channel >= 1
+
 
 class ConfigError(ValueError):
     """Raised when a config document cannot be turned into a usable vehicle."""
@@ -99,6 +110,17 @@ class MotorConfig:
     arm and position maps to depends on the frame class, and guessing spins the wrong
     motor. ``None`` means unestablished, and the dashboard reports it rather than
     picking a value.
+
+    ``reversed`` is the one field that changes which way a propeller turns. It becomes
+    a bit in ``SERVO_BLH_RVMASK``, from which ArduPilot sends the DShot reverse command
+    to that ESC. That parameter is ``@RebootRequired``, and the HAL only ORs into its
+    internal reversed mask, so **neither setting nor clearing a bit takes effect until
+    the flight controller reboots.**
+
+    ``spin`` records the direction the propeller was *observed* to turn. It is never
+    written to the flight controller and editing it changes nothing on the vehicle --
+    it exists so the intended layout can be compared against what the ESCs actually do,
+    and for prop-fitting checks. To change a direction, edit ``reversed`` and reboot.
     """
 
     channel: int
@@ -124,11 +146,14 @@ class ArmConfig:
     def live(self) -> bool:
         return self.status == "live"
 
-    def servo_channels(self) -> Tuple[int, int]:
-        return self.gimbal.outer.channel, self.gimbal.inner.channel
+    def servo_channels(self) -> Tuple[int, ...]:
+        return tuple(
+            ch for ch in (self.gimbal.outer.channel, self.gimbal.inner.channel)
+            if channel_assigned(ch)
+        )
 
     def motor_channels(self) -> Tuple[int, ...]:
-        return tuple(motor.channel for motor in self.motors.values())
+        return tuple(motor.channel for motor in self.motors.values() if channel_assigned(motor.channel))
 
 
 @dataclass(frozen=True)
@@ -143,7 +168,11 @@ class FrameConfig:
 class LinkConfig:
     device: str
     baud: int
-    esc_telemetry_serial: Optional[int]
+    esc_telemetry_serials: Tuple[int, ...] = ()
+
+    @property
+    def esc_telemetry_serial(self) -> Optional[int]:
+        return self.esc_telemetry_serials[0] if self.esc_telemetry_serials else None
 
 
 @dataclass(frozen=True)
@@ -211,6 +240,8 @@ class VehicleConfig:
         return sorted(set(out))
 
     def arm_for_servo_channel(self, channel: int) -> Optional[Tuple[ArmConfig, str]]:
+        if not channel_assigned(channel):
+            return None
         for entry in self.arms:
             for name in AXIS_NAMES:
                 if entry.gimbal.axis(name).channel == channel:
@@ -218,6 +249,8 @@ class VehicleConfig:
         return None
 
     def arm_for_motor_channel(self, channel: int) -> Optional[Tuple[ArmConfig, str]]:
+        if not channel_assigned(channel):
+            return None
         for entry in self.arms:
             for name, motor in entry.motors.items():
                 if motor.channel == channel:
@@ -256,8 +289,11 @@ def _axis_from_dict(data: Dict[str, Any], where: str) -> AxisConfig:
         max_us=int(data.get("max_us", 2000)),
         trim_deg=float(data.get("trim_deg", 0.0)),
     )
-    if axis.channel < 1 or axis.channel > 32:
-        raise ConfigError(f"{where}: channel {axis.channel} outside SERVO1..SERVO32")
+    if axis.channel < CHANNEL_MIN or axis.channel > CHANNEL_MAX:
+        raise ConfigError(
+            f"{where}: channel {axis.channel} outside 0..SERVO{CHANNEL_MAX} "
+            "(0 disables the output)"
+        )
     if axis.us_per_deg <= 0.0:
         raise ConfigError(f"{where}: us_per_deg must be positive")
     if axis.min_us >= axis.max_us:
@@ -304,8 +340,11 @@ def _arm_from_dict(data: Dict[str, Any], defaults: Dict[str, Any], index: int) -
         if entry is None:
             continue
         channel = int(_require(entry, "channel", f"{where}.motors.{name}"))
-        if channel < 1 or channel > 32:
-            raise ConfigError(f"{where}.motors.{name}: channel {channel} outside SERVO1..SERVO32")
+        if channel < CHANNEL_MIN or channel > CHANNEL_MAX:
+            raise ConfigError(
+                f"{where}.motors.{name}: channel {channel} outside 0..SERVO{CHANNEL_MAX} "
+                "(0 disables the output)"
+            )
         sequence = entry.get("test_sequence")
         function = entry.get("function")
         if function is not None and not 33 <= int(function) <= 40:
@@ -339,9 +378,39 @@ def _check_channel_conflicts(arms: List[ArmConfig]) -> None:
         claims = [(arm.gimbal.axis(name).channel, f"{arm.id}.{name}") for name in AXIS_NAMES]
         claims += [(motor.channel, f"{arm.id}.motor.{name}") for name, motor in arm.motors.items()]
         for channel, who in claims:
+            if not channel_assigned(channel):
+                continue
             if channel in owners:
                 raise ConfigError(f"SERVO{channel} claimed by both {owners[channel]} and {who}")
             owners[channel] = who
+
+
+def _esc_telemetry_serials(link_raw: Dict[str, Any]) -> Tuple[int, ...]:
+    """
+    SERIALn indexes that carry BLHeli T-wire telemetry.
+
+    ``esc_telemetry_serials`` is the current form. A lone ``esc_telemetry_serial``
+    still loads so an older document does not silently lose its only UART.
+    """
+    raw = link_raw.get("esc_telemetry_serials")
+    if raw is None:
+        single = link_raw.get("esc_telemetry_serial")
+        if single is None:
+            return ()
+        raw = [single]
+    if not isinstance(raw, (list, tuple)):
+        raise ConfigError("link.esc_telemetry_serials must be a list of SERIALn indexes")
+    serials: List[int] = []
+    for item in raw:
+        try:
+            index = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"link.esc_telemetry_serials: invalid entry {item!r}") from exc
+        if index < 0:
+            raise ConfigError(f"link.esc_telemetry_serials: SERIAL index {index} is negative")
+        if index not in serials:
+            serials.append(index)
+    return tuple(serials)
 
 
 def from_dict(data: Dict[str, Any], path: str = "") -> VehicleConfig:
@@ -377,7 +446,7 @@ def from_dict(data: Dict[str, Any], path: str = "") -> VehicleConfig:
         link=LinkConfig(
             device=str(link_raw.get("device", "/dev/ttyACM0")),
             baud=int(link_raw.get("baud", 115200)),
-            esc_telemetry_serial=link_raw.get("esc_telemetry_serial"),
+            esc_telemetry_serials=_esc_telemetry_serials(link_raw),
         ),
         bench_limits=BenchLimits(
             motor_percent=float(limits_raw.get("motor_percent", 50.0)),
@@ -496,6 +565,7 @@ def to_dict(cfg: VehicleConfig) -> Dict[str, Any]:
         "link": {
             "device": cfg.link.device,
             "baud": cfg.link.baud,
+            "escTelemetrySerials": list(cfg.link.esc_telemetry_serials),
             "escTelemetrySerial": cfg.link.esc_telemetry_serial,
         },
         "benchLimits": {

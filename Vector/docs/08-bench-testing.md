@@ -23,8 +23,10 @@ Open <http://localhost:8765> and press Connect.
 **Expect:** the link pill turns green, heartbeat age stays under 2 s, mode and armed
 state populate.
 
-**If nothing appears:** on WSL, the device has to be usbipd-attached — the launcher does
-this, but not if the board is currently attached to Windows for flashing. Check the
+**If nothing appears:** on WSL, the device has to be usbipd-attached — the launcher
+does this on every start, including after a reboot left the board Shared but not
+Attached. It will not if you passed `--no-usb`, or if the board is currently
+attached to Windows for flashing. Check the
 Telemetry page's message counts: empty while connected means stream rates were never
 granted, so press Re-request streams.
 
@@ -62,6 +64,35 @@ An output reading 0 there is emitting nothing.
 `FRAME_CLASS` and `FRAME_TYPE` are the one thing the dashboard will not fix for you. They
 need a reboot, and changing them rearranges which physical motor answers to which mixer
 slot, so the report flags a mismatch and leaves it to you.
+
+### Pin-level check
+
+Setup → Mapping debug. Pick a channel and run a servo sweep or a 1 s motor spin. This
+drives the **pin**, not the arm name, so it is the check that answers "is this the
+output I think it is?" Channel 0 is not a pin — that value disables an output in the
+config.
+
+Props off for the motor test. Use the servo test on a PWM group, not on a DShot timer —
+Setup → **Output map** shows which groups are which, and a pin in a group marked DShot
+will not move a servo however it is commanded.
+
+### A servo that does not move
+
+Work down this list; each item is silent on the vehicle, so none of them will announce
+itself.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Some onboard pins work, others do nothing | The dead pins share a timer group with a motor, so the group is in DShot | Output map panel names it. Move the servo to a PWM group or the CAN node |
+| Onboard pins that used to work went dead | A motor slot has no channel in the config, so the mixer claimed a low output at boot and took its group into DShot | Give every motor slot an explicit channel, re-apply mapping, reboot |
+| Everything on the node stays still | `CAN_D1_UC_SRV_BM` / `CAN_D1_UC_ESC_BM` default to 0, so the node is never sent a command | Re-apply output mapping; reboot if the dashboard says CAN was off |
+| One CAN output stays still, the others move | That node output's own `OUTx_FUNCTION` is wrong | Servo: `50 + channel`. ESC: `33 + slot` — OUT1–OUT4 are 33–36 as built. The flight controller cannot do this for you |
+| A CAN motor never turns from the Motors panel | A CAN ESC only takes throttle while soft-armed | It goes through the motor test automatically; it needs a `test_sequence` |
+| `reversed` on a CAN motor changes nothing | The reverse mask stops at the flight controller's pins | Set direction in the ESC, or swap two motor wires |
+| S17 and up do not exist at all | `SERVO_32_ENABLE` is 0 | Re-apply output mapping |
+
+The first two are checked automatically: `Vector/tools/fc-report.py` prints them under
+**Output map**, and the dashboard reports them whenever mapping is asserted.
 
 ## 3. Gimbal centre
 
@@ -145,18 +176,69 @@ matters far less than having the sign right.
 **Still props off.** Props go on only after everything above passes, and even then only
 with the airframe firmly restrained and everyone clear.
 
-Prerequisite: `test_sequence` must be set for the motor. If it is `null` the dashboard
-refuses, which is correct — see [Firmware](05-firmware.md) for the values.
+Prerequisite: `function` must be set for the motor. If it is `null` the output is
+Disabled and emits nothing, and the dashboard refuses rather than pretending otherwise.
+Spinning is also refused while the vehicle is armed.
 
 Start at the lowest throttle that produces rotation, for the shortest duration:
 
 - [ ] Bottom motor alone — confirm direction by eye
 - [ ] Top motor alone — confirm it is **opposite** the bottom
 - [ ] Both together — listen for beat frequencies, which indicate mismatched speeds
+- [ ] All live arms, both motors — every onboard propeller should come up together,
+      then South and West follow one at a time
 - [ ] Check ESC telemetry: RPM present, temperature sane, current plausible
 
-If the top motor spins the same way as the bottom, its `reversed` flag or the DShot
-reverse command did not take. Re-apply the output mapping (§2) and retest.
+South and West motors sit behind the CAN-to-PWM node. A CAN ESC receives zero unless
+the vehicle is soft-armed, and on the ground only the motor test soft-arms, so the
+dashboard runs those four through `DO_MOTOR_TEST` by `test_sequence` after the onboard
+set. If one stays silent while the others run, the node's `OUTx_FUNCTION` for that
+output is the first thing to check — the Output map on Setup shows the number.
+
+### How the dashboard spins several motors at once
+
+Not with `DO_MOTOR_TEST`. ArduPilot's motor test holds one motor sequence in static
+state, so a second command replaces the first instead of adding to it — sending one per
+motor left only the last one spinning, which is why a single click used to appear to skip
+motors.
+
+The Motors panel drives the output channels directly instead, the same way the gimbals
+are driven: each channel's `SERVOn_FUNCTION` is forced to Disabled so `DO_SET_SERVO` is
+honoured, all of them are written in one pass, and the motor functions go back when the
+spin ends.
+
+Two consequences are worth knowing before pressing the button:
+
+- The motor test's own landed check and failsafe suppression are not in this path, which
+  is why spinning is refused while armed.
+- **`DO_SET_SERVO` has no vehicle-side timeout.** The flight controller holds the last
+  pulse width it was given. The stop is owned by the dashboard server, so closing the tab
+  or losing the browser still stops on time — but if the server process or the serial link
+  dies mid-spin, nothing on the board will stop those propellers.
+
+### Establishing direction
+
+Which way a propeller *must* turn is fixed by the frame — every bottom motor CCW and
+every top motor CW seen from above, derived in [Firmware](05-firmware.md). Whether a
+given ESC produces that depends on how its three phases happen to be wired, which is per
+motor and cannot be worked out from the config. So it is observed:
+
+```bash
+Vector/tools/motor-direction.py
+Vector/tools/motor-direction.py --arm north
+```
+
+It spins one motor at a time, asks which way it turned, records the answer as `spin`, and
+flips `reversed` on any motor turning against the frame. It refuses to start until you
+confirm the props are off, and writes nothing until you have seen the summary.
+
+One motor at a time is the point. A pair spun together tells you nothing about which of
+the two is wired backwards.
+
+Afterwards, re-apply the output mapping (§2) **and reboot**. Direction does not change
+without a reboot: `SERVO_BLH_RVMASK` is `@RebootRequired` and the HAL only ORs into its
+reversed mask, so a cleared bit survives until boot too. This is the single most common
+reason a direction change appears to do nothing.
 
 Watch cell voltage during the test. Li-ion sags hard under load; a large drop at low
 throttle means a tired pack or a bad connection.
@@ -226,14 +308,19 @@ them — they end up in `vector.json`, which is the record.
 | One arm leans opposite the others | `mount_yaw_deg` or an axis `sign` wrong on that arm |
 | Levelling amplifies tilt instead of cancelling | Sign inverted; stop immediately |
 | Envelope smaller than expected | `trim_deg` eating travel, especially on the inner axis |
-| No ESC telemetry | `SERIAL6_PROTOCOL` not 16, or the telemetry wire is not on RX4 |
+| No ESC telemetry | `SERIAL4_PROTOCOL` / `SERIAL6_PROTOCOL` not 16, T-wire not on RX3/RX4, or firmware that only reads the first ESC-telemetry UART |
 | Servos jitter | Two writers — check the arbiter owner on screen; or SBEC ground not bonded |
 | Pulse readout differs from what was commanded | Something else is writing those outputs |
 | A motor does nothing, commands accepted | `SERVOn_FUNCTION` is 0. A disabled output emits no signal at all |
 | Nothing on any output after moving a channel | Reassigning a gimbal onto a motor's old channel erased that motor's function, and `PARAM_SET` persists. Re-apply the mapping |
-| Motor test spins a different motor than named | `test_sequence` is for another `FRAME_CLASS`/`FRAME_TYPE` |
+| `motor-direction.py` spins a different motor than named | `test_sequence` is for another `FRAME_CLASS`/`FRAME_TYPE` |
+| Dashboard spins a different motor than named | `channel` or `function` is wrong for that arm |
 | Gimbal will not reach its limit | `SERVOn_MIN`/`MAX` still at 1000–2000, clamping the 500–2500 window |
 | Servo silent but the report shows a valid pulse | Signal is arriving; look downstream at SBEC power or the ground bond |
+| Changing `reversed` does nothing | `SERVO_BLH_RVMASK` is `@RebootRequired`, and the HAL only ORs into its reversed mask. Reboot |
+| Changing `spin` does nothing | It never will. `spin` is an observation and is never written to the board; `reversed` is the control |
+| Wrong propeller spins after moving a motor | The old channel kept its motor function. Re-apply the mapping, which now clears stale ones, then reboot |
+| A motor runs up hard the moment it is powered | `SERVOn_REVERSED` is 1 on a motor output, which idles it at full throttle. Re-apply the mapping |
 
 When more than one of these is true at once, run `Vector/tools/fc-report.py` before
 changing anything. Most of them are a board that disagrees with `vector.json`, and the

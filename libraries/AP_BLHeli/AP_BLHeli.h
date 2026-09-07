@@ -215,6 +215,9 @@ private:
     AP_HAL::UARTDriver *uart;
     AP_HAL::UARTDriver *debug_uart;
     AP_HAL::UARTDriver *telem_uart;
+    static const uint8_t max_telem_uarts = 4;
+    AP_HAL::UARTDriver *telem_uarts[max_telem_uarts];
+    uint8_t num_telem_uarts;
 
     static const uint8_t max_motors = AP_BLHELI_MAX_ESCS;
     uint8_t num_motors;
@@ -253,8 +256,8 @@ private:
     uint32_t last_telem_request_us;
     uint8_t last_telem_esc;
     static const uint8_t telem_packet_size = 10;
-    bool telem_uart_started;
-    uint32_t last_telem_byte_read_us;
+    bool telem_uart_started[max_telem_uarts];
+    uint32_t last_telem_byte_read_us[max_telem_uarts];
     int8_t last_control_port;
 
     void serial_end();
@@ -288,7 +291,8 @@ private:
     bool BL_VerifyFlash(const uint8_t *buf, uint16_t n);
     void blheli_process_command(void);
     void run_connection_test(uint8_t chan);
-    void read_telemetry_packet(void);
+    void read_telemetry_packet(AP_HAL::UARTDriver *uart);
+    void read_telem_uart(uint8_t idx, uint32_t now);
     void log_bidir_telemetry(void);
 
     // protocol handler hook

@@ -17,6 +17,14 @@ import store, { arms, isPending, linkUp, send } from '../lib/store'
 
 const HISTORY = 240
 
+const telemProtocolHint = computed(() => {
+  const serials = store.config?.link.escTelemetrySerials ?? []
+  if (!serials.length) {
+    return 'SERIALn_PROTOCOL'
+  }
+  return serials.map((n) => `SERIAL${n}_PROTOCOL`).join(', ')
+})
+
 const history = reactive<Record<string, number[]>>({
   roll: [],
   pitch: [],
@@ -285,9 +293,10 @@ const escColors = computed(() => {
       </div>
       <div v-else class="pad stack">
         <p class="faint" style="margin: 0">
-          To enable it: connect each ESC's telemetry wire to a UART, set that port's
-          <code>SERIAL{{ store.config?.link.escTelemetrySerial ?? 'n' }}_PROTOCOL</code> to 16
-          (ESC Telemetry), and set <code>SERVO_BLH_AUTO</code> or the relevant DShot options.
+          To enable it: connect each DShot ESC's T wire to RX3 (SERIAL4) and RX4
+          (SERIAL6), set those ports'
+          <code>{{ telemProtocolHint }}</code>
+          to 16 (ESC Telemetry), and reboot. CAN ESCs report over DroneCAN, not these pins.
         </p>
         <StatusPill tone="idle">optional</StatusPill>
       </div>

@@ -93,51 +93,138 @@ not of ArduPilot.
 Twelve usable outputs against a requirement of 8 ESC signals plus 8 servos is why the
 CAN-to-PWM board exists on this vehicle.
 
-### As built today (North and South)
+### The CAN-to-PWM adapter is not a pin remap
+
+S14 and above do not exist as timer pins on the H743. `DO_SET_SERVO` on those channels
+only updates a number inside the flight controller. That number becomes a pulse on the
+expander if, and only if:
+
+| Parameter | Needed value | Why |
+|---|---|---|
+| `CAN_P1_DRIVER` | 1 | Attaches DroneCAN to the CAN1 port. Reboot required |
+| `CAN_D1_PROTOCOL` | 1 | DroneCAN. Reboot required |
+| `CAN_D1_UC_SRV_BM` | bits for S14–S21 | **Defaults to 0.** With the default, the adapter is silent |
+| `CAN_D1_UC_OPTION` bit 4 | set | Send raw pulse widths, not a scaled −1..1 |
+| `SERVO_32_ENABLE` | 1 | Without it, S17–S32 do not exist as outputs |
+
+The dashboard asserts all of these when output mapping is applied. If CAN was off, reboot
+once before probing S14+. On the expander itself, each `OUTx_FUNCTION` must be
+`50 + servo number` (51 for servo 1, 64 for servo 14) or that node output stays a
+default motor slot and ignores actuator commands.
+
+S11 and S12 are the only onboard pair that is PWM-only and not shared with DShot. They
+will move a servo even when the CAN path is completely unconfigured, which is why they
+were the only channels that answered during mapping debug.
+
+### Which node output a channel is
+
+The node's outputs are numbered from S14 up: **S14 is the node's first output, S15 its
+second, S16 its third, S17 its fourth.** That correspondence is not automatic. It holds
+only because each node output's own `OUTx_FUNCTION` names the thing that reaches it, and
+that number differs by what is on the output:
+
+| On the node output | Path from the flight controller | Node `OUTx_FUNCTION` |
+|---|---|---|
+| A servo | `ActuatorCommand`, gated by `CAN_D1_UC_SRV_BM` | `50 + channel` (64 for S14) |
+| An ESC | ESC `RawCommand`, gated by `CAN_D1_UC_ESC_BM` | `Motor(k+1)` = `33 + k`, where k is the RawCommand slot |
+
+The dashboard sets `CAN_D1_UC_ESC_OF = 13`, which packs the RawCommand so S14 is slot
+0. So for the motors as built: **OUT1 = 33, OUT2 = 34, OUT3 = 35, OUT4 = 36.** Get that
+wrong on the node and the output is silent in a way no flight-controller parameter
+explains. The Setup page's Output map prints the number each output needs.
+
+### Two things about motors on the node
+
+**They only turn while the vehicle is soft-armed.** `AP_DroneCAN::SRV_send_esc` sends
+zero to every ESC in the RawCommand unless `hal.util->get_soft_armed()` is true. The
+dashboard's normal bench spin drives pins with `DO_SET_SERVO` while disarmed, which can
+never move a CAN ESC. Only `DO_MOTOR_TEST` soft-arms while on the ground
+(`ArduCopter/motor_test.cpp`), so South and West motors spin through the motor test —
+one at a time, by `test_sequence`, after the onboard set has run together.
+
+**Their direction cannot be set from the flight controller.** `SERVO_BLH_RVMASK` and
+BLHeli passthrough stop at the H743's own pins. `reversed: true` on South and West upper
+motors records the intent, and the dashboard says so every time it asserts the mapping;
+the direction itself has to be set in that ESC's configuration or by swapping any two
+of its three motor wires.
+
+### The mixer claims any motor slot the config does not place
+
+This is the other half of the same problem, and it is the one that actually bit.
+
+`AP_Motors::add_motor_num` calls `SRV_Channels::set_aux_channel_default(function,
+motor_num)`, which puts MotorN on SERVO(N) unless some channel already claims that
+function. The catch is in that function's first test: it treats `SERVOn_FUNCTION = 0`
+as unclaimed, because Disabled **is** `k_none`. Setting a pin to Disabled — exactly what
+a gimbal channel needs for `DO_SET_SERVO` — does not reserve it. It offers it up.
+
+So every motor slot left unplaced in `vector.json` lands on a low channel at the next
+boot, turns it into a DShot output, and takes its whole timer group with it:
+
+| Config says | What the firmware does at boot | What the operator sees |
+|---|---|---|
+| All 8 motors `channel: 0` | Motor1–Motor8 claim S1–S8 | TIM8, TIM5, TIM4 all go DShot |
+| Gimbal servos on S5–S10 | Those pins are now DShot ESC outputs | Only S11 and S12 move a servo |
+
+The second row is a real session: the servos on S11/S12 worked, a servo on S9 did
+nothing, and every parameter read back exactly as written. The fix is not a parameter —
+it is to give all eight motor slots an explicit channel, so the mixer has nothing left
+to claim.
+
+`Vector/dashboard/server/board.py` holds the timer table and checks a config against it.
+The check runs when output mapping is asserted, shows on the Setup page's **Output map**
+panel, prints in `Vector/tools/fc-report.py`, and is covered by
+`Vector/tests/test_board.py`, so this cannot come back quietly.
+
+### Output allocation
+
+Two arms' motors on the flight controller's two PWM-only timer pairs, all eight servos
+on the two four-pin groups, the other two arms' motors on the CAN node. Every timer
+group is single-mode.
 
 | Function | Output | Group | Mode |
 |---|---|---|---|
-| North inner servo | S1 | TIM8 | PWM |
-| North outer servo | S2 | TIM8 | PWM |
-| South top motor | S5 | TIM5 | DShot600, reversed |
-| South bottom motor | S6 | TIM5 | DShot600 |
-| North bottom motor | S7 | TIM4 | DShot600 |
-| North top motor | S8 | TIM4 | DShot600, reversed |
-| South outer servo | S11 | TIM15 | PWM |
-| South inner servo | S12 | TIM15 | PWM |
+| North upper motor | S1 | TIM8 | DShot600 |
+| North lower motor | S2 | TIM8 | DShot600 |
+| West inner servo | S3 | TIM5 | PWM |
+| West outer servo | S4 | TIM5 | PWM |
+| North inner servo | S5 | TIM5 | PWM |
+| North outer servo | S6 | TIM5 | PWM |
+| East inner servo | S7 | TIM4 | PWM |
+| East outer servo | S8 | TIM4 | PWM |
+| South inner servo | S9 | TIM4 | PWM |
+| South outer servo | S10 | TIM4 | PWM |
+| East lower motor | S11 | TIM15 | DShot600 |
+| East upper motor | S12 | TIM15 | DShot600 |
+| *(unused / WS2812 LED)* | S13 | TIM1 | — |
+| South upper motor | S14 | CAN out 1 | ESC RawCommand |
+| South lower motor | S15 | CAN out 2 | ESC RawCommand |
+| West upper motor | S16 | CAN out 3 | ESC RawCommand |
+| West lower motor | S17 | CAN out 4 | ESC RawCommand |
 
-Every group is single-mode: TIM8 and TIM15 carry only servos, TIM4 and TIM5 carry only
-motors. S3 and S4 sit unused on the motor side of TIM5, which is harmless.
+"Upper" is the config's `top` motor and "lower" its `bottom`.
 
-South's servos were briefly on S3/S4, which put PWM servos and DShot motors on TIM5 at
-once. Moving them to TIM15 was the cheapest fix: two signal wires, and nothing else in
-the allocation had to change.
+S17 needs `SERVO_32_ENABLE = 1` before it exists as an output at all.
 
-### Planned for East and West
-
-| Arm | Outer | Inner | Bottom | Top |
-|---|---|---|---|---|
-| East | S14 | S15 | S9 | S10 |
-| West | S18 | S19 | S4 | S3 |
-
-East and West servos stay on the CAN-to-PWM board (channels 14 and up). East motors
-take the unused half of TIM4 next to North. West motors take the free half of TIM5 next
-to South, so all eight ESC signals end up on the two DShot groups and all eight servo
-signals on PWM groups or CAN. No later arm forces a rewire of an earlier one.
+A timer group's PWM/DShot mode is chosen at boot from the motor functions present
+then. Moving East's motors off S3/S4 onto S11/S12 updates the parameters immediately,
+but TIM5 stays DShot — and silent for servos — until the board is restarted. TIM4
+keeps working through that because it was never a motor group.
 
 ### Current config channel map
 
-Taken from `Vector/config/vector.json`. Channels 14 and up are CAN-to-PWM placeholders.
+Taken from `Vector/config/vector.json`.
 
-| Arm | Status | Outer | Inner | Bottom | Top |
+| Arm | Status | Outer | Inner | Lower (`bottom`) | Upper (`top`) |
 |---|---|---|---|---|---|
-| North | live | S2 | S1 | S7 | S8 |
-| East | planned | S14 | S15 | S9 | S10 |
-| South | live | S11 | S12 | S6 | S5 |
-| West | planned | S18 | S19 | S4 | S3 |
+| North | live | S6 | S5 | S2 | S1 |
+| East | live | S8 | S7 | S11 | S12 |
+| South | live | S10 | S9 | S15 (CAN 2) | S14 (CAN 1) |
+| West | live | S4 | S3 | S17 (CAN 4) | S16 (CAN 3) |
 
-`planned` means the dashboard displays the arm but refuses to command it. Only `live`
-arms are ever written to.
+Every gimbal answers with nothing but a USB cable, after a reboot that lets TIM5
+come up as PWM. North and East motors do too; South and West motors need the CAN
+node running and only turn under the motor test.
 
 ## Power and wiring
 
@@ -158,17 +245,25 @@ the failure mode under a hard throttle transient is voltage sag rather than a cl
 cutoff. Watch cell voltage, not pack percentage — the Telemetry page shows pack
 voltage divided by six cells for this reason.
 
-**ESC telemetry** goes to RX4. On this board `SERIAL_ORDER` is:
+**ESC telemetry** for the DShot ESCs (North/West, S3–S6) goes to RX3 and RX4. Each
+4-in-1 T wire is one-way into RX; TX3 and TX4 are unused. Do not splice two T
+outputs onto one pad if both stacks can reply at once — one bus per UART.
+
+On this board `SERIAL_ORDER` is:
 
 ```text
 OTG1  UART7  USART1  USART2  USART3  UART8  UART4  USART6  OTG2
   0      1      2       3       4      5      6      7      8
 ```
 
-so UART4 is **SERIAL6**, and `SERIAL6_PROTOCOL` must be 16 (ESC Telemetry). Telemetry
-is one-wire into RX4; TX4 is unused. The config records this as
-`link.esc_telemetry_serial: 6` and the dashboard's Telemetry page names the parameter
-directly when nothing is reporting.
+| Pad | MCU UART | `SERIALn` | Parameter |
+|---|---|---|---|
+| RX3 | USART3 (`PD9`) | SERIAL4 | `SERIAL4_PROTOCOL` = 16 |
+| RX4 | UART4 (`PB8`) | SERIAL6 | `SERIAL6_PROTOCOL` = 16 |
+
+The config records this as `link.esc_telemetry_serials: [4, 6]`. Connect and apply
+mapping writes both protocols. They take effect at boot, so reboot after the first
+apply. East/South CAN ESCs report over DroneCAN, not these pins.
 
 ## Servo signal characteristics
 

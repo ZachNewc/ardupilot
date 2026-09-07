@@ -22,6 +22,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from . import board
 from . import config as vconfig
 from . import kinematics as kin
 from . import state as vstate
@@ -119,6 +120,7 @@ def config_payload() -> Dict[str, Any]:
         **vconfig.to_dict(cfg),
         "workspaces": {arm.id: kin.workspace_payload(arm) for arm in cfg.arms},
         "commands": command_catalogue(),
+        "outputMap": board.payload(cfg),
         # The on-disk document, so the Setup page can edit it without the UI's
         # camelCase view having to be a lossless mirror of the file format.
         "document": cfg.raw,

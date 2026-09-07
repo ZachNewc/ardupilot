@@ -110,6 +110,14 @@ class SchemaTest(unittest.TestCase):
         motor_keys = set(self.schema["definitions"]["motor"]["properties"])
         self.assertEqual(motor_keys, {"channel", "spin", "reversed", "test_sequence", "function"})
 
+    def test_schema_accepts_channel_zero(self) -> None:
+        """0 is the documented way to disable an output from Setup."""
+        jsonschema = self.validator()
+        edited = copy.deepcopy(self.document)
+        edited["arms"][1]["outer"]["channel"] = 0
+        edited["arms"][1]["motors"]["top"]["channel"] = 0
+        jsonschema.validate(edited, self.schema)
+
 
 class LoaderTest(unittest.TestCase):
     @classmethod
@@ -135,9 +143,14 @@ class LoaderTest(unittest.TestCase):
         """The UI labels telemetry by owner, so this mapping has to be exact."""
         for arm in self.cfg.arms:
             for name in ("outer", "inner"):
-                found = self.cfg.arm_for_servo_channel(arm.gimbal.axis(name).channel)
+                channel = arm.gimbal.axis(name).channel
+                if channel < 1:
+                    continue
+                found = self.cfg.arm_for_servo_channel(channel)
                 self.assertEqual(found, (arm, name))
             for role, motor in arm.motors.items():
+                if motor.channel < 1:
+                    continue
                 found = self.cfg.arm_for_motor_channel(motor.channel)
                 self.assertEqual(found, (arm, role))
 
@@ -158,6 +171,28 @@ class LoaderTest(unittest.TestCase):
         broken["arms"][1]["id"] = broken["arms"][0]["id"]
         with self.assertRaisesRegex(vconfig.ConfigError, "unique"):
             vconfig.from_dict(broken)
+
+    def test_channel_zero_disables_an_output(self) -> None:
+        """
+        Channel 0 is the Setup page's way of turning a pin off without deleting the arm.
+
+        Several roles may share it, it is not a SERVO output, and lookups must not treat
+        it as owned -- otherwise the first unused pin would steal every disabled one.
+        """
+        edited = self.document()
+        edited["arms"][1]["outer"]["channel"] = 0
+        edited["arms"][1]["inner"]["channel"] = 0
+        edited["arms"][1]["motors"]["bottom"]["channel"] = 0
+        edited["arms"][1]["motors"]["top"]["channel"] = 0
+        edited["arms"][3]["outer"]["channel"] = 0
+        cfg = vconfig.from_dict(edited)
+        east = cfg.arm("east")
+        self.assertEqual(east.servo_channels(), ())
+        self.assertEqual(east.motor_channels(), ())
+        self.assertNotIn(0, cfg.servo_channels())
+        self.assertNotIn(0, cfg.motor_channels())
+        self.assertIsNone(cfg.arm_for_servo_channel(0))
+        self.assertIsNone(cfg.arm_for_motor_channel(0))
 
     def test_out_of_range_channel_is_rejected_with_its_path(self) -> None:
         """The message has to say which arm and axis, or it is useless in a big config."""
@@ -211,6 +246,17 @@ class LoaderTest(unittest.TestCase):
             result = vconfig.save(self.cfg, {"arms": trimmed}, path=target)
             self.assertEqual([arm.id for arm in result.arms], [trimmed[0]["id"]])
             self.assertEqual(len(load_json(target)["arms"]), 1)
+
+    def test_esc_telemetry_serials_are_rx3_and_rx4(self) -> None:
+        self.assertEqual(self.cfg.link.esc_telemetry_serials, (4, 6))
+
+    def test_a_legacy_single_esc_telemetry_serial_still_loads(self) -> None:
+        edited = self.document()
+        edited["link"].pop("esc_telemetry_serials", None)
+        edited["link"]["esc_telemetry_serial"] = 6
+        cfg = vconfig.from_dict(edited)
+        self.assertEqual(cfg.link.esc_telemetry_serials, (6,))
+        self.assertEqual(cfg.link.esc_telemetry_serial, 6)
 
     def test_unknown_keys_survive_a_save(self) -> None:
         """
