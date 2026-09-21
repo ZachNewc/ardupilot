@@ -9,6 +9,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { batteryTone, packSocPercent } from '../lib/battery'
 import { age, num, pct } from '../lib/format'
 import { isMotorKillKey, isTypingTarget } from '../lib/keys'
 import store, { isPending, linkUp, send } from '../lib/store'
@@ -56,6 +57,10 @@ const linkText = computed(() => {
 })
 
 const budget = computed(() => link.value?.budget ?? null)
+
+const packVolts = computed(() => vehicle.value?.voltage ?? 0)
+const batteryPercent = computed(() => packSocPercent(packVolts.value))
+const packTone = computed(() => batteryTone(packVolts.value))
 
 function connect() {
   send('connect', { device: device.value, baud: store.config?.link.baud ?? 115200 })
@@ -108,7 +113,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown, true))
         link {{ pct(budget.utilisation) }}
       </span>
       <span v-if="vehicle" :title="'Flight controller CPU load'">cpu {{ num(vehicle.loadPercent, 0) }}%</span>
-      <span v-if="vehicle?.voltage" :title="'Pack voltage'">{{ num(vehicle.voltage, 2) }} V</span>
+      <span
+        v-if="packVolts"
+        :class="packTone"
+        :title="'6S2P li-ion from pack voltage. Sags under load; not a coulomb count.'"
+      >
+        {{ num(packVolts, 2) }} V · {{ num(batteryPercent, 0) }}%
+      </span>
     </div>
 
     <div class="row">
