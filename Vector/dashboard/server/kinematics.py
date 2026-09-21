@@ -354,6 +354,72 @@ def world_up_in_body(roll_deg: float, pitch_deg: float) -> Tuple[float, float, f
     )
 
 
+def gravity_down_in_body(roll_deg: float, pitch_deg: float) -> Tuple[float, float, float]:
+    """
+    Unit gravity (down) in body frame.
+
+    ArduPilot IMUs use NED, so a vehicle sitting still reads approximately this
+    vector in g, not zero. Level is (0, 0, +1).
+    """
+    up_x, up_y, up_z = world_up_in_body(roll_deg, pitch_deg)
+    return (-up_x, -up_y, -up_z)
+
+
+def linear_accel_g(
+    accel_g: Tuple[float, float, float], roll_deg: float, pitch_deg: float
+) -> Tuple[float, float, float]:
+    """
+    Gravity-compensated linear acceleration in body frame, in g.
+
+    Subtracting gravity_down leaves the translation that should be opposed, so a
+    static tilt is not treated as a shove.
+    """
+    gx, gy, gz = gravity_down_in_body(roll_deg, pitch_deg)
+    ax, ay, az = accel_g
+    return (ax - gx, ay - gy, az - gz)
+
+
+def oppose_horizontal_accel(
+    lin_x_g: float,
+    lin_y_g: float,
+    gain_deg_g: float,
+    deadband_g: float,
+    invert_x: bool,
+    invert_y: bool,
+    cap_deg: float,
+) -> Tuple[float, float, bool]:
+    """
+    Lean motor thrust against a horizontal linear acceleration.
+
+    A forward shove (positive body-X accel) asks for an aft lean so the rotors,
+    if they were spinning, would push the vehicle back. Vertical accel is ignored:
+    collective thrust is not this loop's job.
+
+    Returns (forward_deg, right_deg, saturated).
+    """
+    mag = math.hypot(lin_x_g, lin_y_g)
+    band = max(0.0, deadband_g)
+    if mag <= band:
+        return 0.0, 0.0, False
+
+    scale = (mag - band) / mag
+    hx = lin_x_g * scale
+    hy = lin_y_g * scale
+    # Opposite the shove: +X accel → aft lean, +Y accel → left lean.
+    forward = -gain_deg_g * hx
+    right = -gain_deg_g * hy
+    if invert_x:
+        forward = -forward
+    if invert_y:
+        right = -right
+
+    magnitude = math.hypot(forward, right)
+    if magnitude > cap_deg and magnitude > 0.0:
+        shrink = cap_deg / magnitude
+        return forward * shrink, right * shrink, True
+    return forward, right, False
+
+
 def solve_thrust_lean(arm: ArmConfig, forward_deg: float, right_deg: float) -> GimbalSolution:
     """Aim an arm by where its thrust should point, using the exact geometry."""
     tilt_outer, tilt_inner = gimbal_for_thrust_lean(arm.mount_yaw_deg, forward_deg, right_deg)

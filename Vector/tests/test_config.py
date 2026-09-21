@@ -247,8 +247,9 @@ class LoaderTest(unittest.TestCase):
             self.assertEqual([arm.id for arm in result.arms], [trimmed[0]["id"]])
             self.assertEqual(len(load_json(target)["arms"]), 1)
 
-    def test_esc_telemetry_serials_are_rx3_and_rx4(self) -> None:
-        self.assertEqual(self.cfg.link.esc_telemetry_serials, (4, 6))
+    def test_esc_telemetry_serials_are_rx4_and_rx6(self) -> None:
+        """RX4 is SERIAL6, RX6 is SERIAL7 on the Matek H743-Wing."""
+        self.assertEqual(self.cfg.link.esc_telemetry_serials, (6, 7))
 
     def test_a_legacy_single_esc_telemetry_serial_still_loads(self) -> None:
         edited = self.document()

@@ -34,7 +34,7 @@
       "trim_deg": 0
     },
     "inner": {
-      "sign": 1,
+      "sign": -1,
       "center_us": 1500,
       "us_per_deg": 11.11111,
       "servo_limit_deg": 90,
@@ -59,7 +59,7 @@
       "motors": {
         "bottom": {
           "channel": 5,
-          "spin": "cw",
+          "spin": "ccw",
           "reversed": false,
           "test_sequence": 1,
           "function": 33
@@ -165,12 +165,12 @@
     "device": "/dev/ttyACM0",
     "baud": 115200,
     "esc_telemetry_serials": [
-      4,
-      6
+      6,
+      7
     ]
   },
   "bench_limits": {
-    "motor_percent": 30,
+    "motor_percent": 39,
     "motor_seconds": 30,
     "servo_speed_deg_s": 180,
     "default_servo_speed_deg_s": 45,

@@ -39,7 +39,9 @@ Press Re-apply output mapping. From `vector.json` this sets, for every live arm:
 - each gimbal channel's `SERVOn_MIN`, `MAX`, `TRIM` and `REVERSED`, because the flight
   controller clamps `DO_SET_SERVO` to that window and a board at the 1000–2000 default
   quietly discards the ends of the travel
-- `SERVO_DSHOT_ESC` and `SERVO_BLH_RVMASK` from the `reversed` flags
+- `SERVO_DSHOT_ESC`, `SERVO_BLH_AUTO`, `MOT_PWM_TYPE` (DShot600) and
+  `SERVO_BLH_RVMASK` from the `reversed` flags. `MOT_PWM_TYPE` and
+  `SERVO_BLH_AUTO` only take effect after a reboot.
 
 **Expect:** an event confirming the motor channel count and reverse mask. If it names
 motors with no function set, those arms cannot spin until `function` is filled in.
@@ -180,7 +182,9 @@ Prerequisite: `function` must be set for the motor. If it is `null` the output i
 Disabled and emits nothing, and the dashboard refuses rather than pretending otherwise.
 Spinning is also refused while the vehicle is armed.
 
-Start at the lowest throttle that produces rotation, for the shortest duration:
+Start at the lowest throttle that produces rotation, for the shortest duration. **X**
+on the keyboard zeroes every motor immediately, from any page — that is the kill, not
+the Arms Stop button buried in a panel.
 
 - [ ] Bottom motor alone — confirm direction by eye
 - [ ] Top motor alone — confirm it is **opposite** the bottom
@@ -275,6 +279,25 @@ lag.
 - The loop runs at 25 Hz. Fast motion will visibly lag. That is the point of the section
   in [Control](04-control.md) about why this cannot fly the vehicle.
 
+## 8.1 Accel hold demo
+
+Accel page. Props off. Same stand as levelling.
+
+Start conservative: oppose gain 20 deg/g, deadband 0.05 g, envelope use 0.5.
+
+Press start and shove the airframe horizontally, or rock it on the stand.
+
+**Expect:** the gimbals lean the motors against the shove. A forward shove points
+thrust aft. Tilting the frame and holding it there should settle back toward centre
+once the IMU and attitude agree, because gravity is subtracted.
+
+**If they move the wrong way:** stop, and flip invert-forward or invert-right.
+
+**If nothing happens:** Telemetry → message counts. `SCALED_IMU` must be incrementing.
+Refresh streams, or restart `Vector/start.sh` so the link requests that interval.
+
+The loop still does not spin the motors. That is deliberate.
+
 ## 9. Serial budget
 
 Telemetry page, Link panel.
@@ -308,7 +331,7 @@ them — they end up in `vector.json`, which is the record.
 | One arm leans opposite the others | `mount_yaw_deg` or an axis `sign` wrong on that arm |
 | Levelling amplifies tilt instead of cancelling | Sign inverted; stop immediately |
 | Envelope smaller than expected | `trim_deg` eating travel, especially on the inner axis |
-| No ESC telemetry | `SERIAL4_PROTOCOL` / `SERIAL6_PROTOCOL` not 16, T-wire not on RX3/RX4, or firmware that only reads the first ESC-telemetry UART |
+| No ESC telemetry | `SERIAL6_PROTOCOL` / `SERIAL7_PROTOCOL` not 16, T-wire not on RX4/RX6, no reboot after changing them, motors not spinning, or firmware that only reads the first ESC-telemetry UART |
 | Servos jitter | Two writers — check the arbiter owner on screen; or SBEC ground not bonded |
 | Pulse readout differs from what was commanded | Something else is writing those outputs |
 | A motor does nothing, commands accepted | `SERVOn_FUNCTION` is 0. A disabled output emits no signal at all |

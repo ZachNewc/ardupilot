@@ -38,17 +38,28 @@ const routes: RouteRecordRaw[] = [
       group: 'Fly',
     } satisfies NavMeta,
   },
-  {
-    path: '/stabilize',
-    name: 'stabilize',
-    component: () => import('./pages/StabilizePage.vue'),
-    meta: {
-      title: 'Stabilize',
-      blurb: 'Bench levelling demo: hold thrust vertical while the frame is moved.',
-      icon: 'level',
-      group: 'Fly',
-    } satisfies NavMeta,
-  },
+    {
+      path: '/stabilize',
+      name: 'stabilize',
+      component: () => import('./pages/StabilizePage.vue'),
+      meta: {
+        title: 'Stabilize',
+        blurb: 'Bench levelling demo: hold thrust vertical while the frame is moved.',
+        icon: 'level',
+        group: 'Fly',
+      } satisfies NavMeta,
+    },
+    {
+      path: '/accel',
+      name: 'accel',
+      component: () => import('./pages/AccelPage.vue'),
+      meta: {
+        title: 'Accel',
+        blurb: 'Oppose measured linear acceleration by leaning motor thrust.',
+        icon: 'accel',
+        group: 'Fly',
+      } satisfies NavMeta,
+    },
   {
     path: '/telemetry',
     name: 'telemetry',

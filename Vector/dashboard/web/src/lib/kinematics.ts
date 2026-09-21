@@ -374,3 +374,69 @@ export function desiredLean(
   }
   return { forward, right, saturated: false }
 }
+
+/** Unit gravity (down) in body frame. Level is (0, 0, +1). */
+export function gravityDownInBody(rollDeg: number, pitchDeg: number): [number, number, number] {
+  const [ux, uy, uz] = worldUpInBody(rollDeg, pitchDeg)
+  return [-ux, -uy, -uz]
+}
+
+/**
+ * Gravity-compensated linear acceleration in body frame, in g.
+ *
+ * Mirrors `linear_accel_g` in kinematics.py. A vehicle at rest reads ~1 g down
+ * on the IMU, not zero; subtracting gravity leaves the shove.
+ */
+export function linearAccelG(
+  accelG: [number, number, number],
+  rollDeg: number,
+  pitchDeg: number,
+): [number, number, number] {
+  const [gx, gy, gz] = gravityDownInBody(rollDeg, pitchDeg)
+  return [accelG[0] - gx, accelG[1] - gy, accelG[2] - gz]
+}
+
+export interface AccelLaw {
+  accelGainDegG: number
+  accelDeadbandG: number
+  invertAccelX: boolean
+  invertAccelY: boolean
+  tiltCapDeg: number
+  maxTiltFraction: number
+}
+
+/**
+ * Lean motor thrust against horizontal linear acceleration.
+ *
+ * Mirrors `oppose_horizontal_accel` so the Accel page can preview the command
+ * while the loop is off. Vertical accel is ignored.
+ */
+export function desiredAccelLean(
+  law: AccelLaw,
+  accelG: [number, number, number],
+  rollDeg: number,
+  pitchDeg: number,
+): LeanCommand {
+  const [linX, linY] = linearAccelG(accelG, rollDeg, pitchDeg)
+  const mag = Math.hypot(linX, linY)
+  const band = Math.max(0, law.accelDeadbandG)
+  if (mag <= band) {
+    return { forward: 0, right: 0, saturated: false }
+  }
+
+  const scale = (mag - band) / mag
+  const hx = linX * scale
+  const hy = linY * scale
+  let forward = -law.accelGainDegG * hx
+  let right = -law.accelGainDegG * hy
+  if (law.invertAccelX) forward = -forward
+  if (law.invertAccelY) right = -right
+
+  const cap = law.tiltCapDeg * clamp(law.maxTiltFraction, 0, 1)
+  const magnitude = Math.hypot(forward, right)
+  if (magnitude > cap && magnitude > 0) {
+    const shrink = cap / magnitude
+    return { forward: forward * shrink, right: right * shrink, saturated: true }
+  }
+  return { forward, right, saturated: false }
+}

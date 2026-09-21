@@ -98,6 +98,10 @@ class FakeLink:
     def motor_test(self, sequence: int, percent: float, seconds: float) -> None:
         self.motor_tests.append((sequence, percent, seconds))
 
+    def motor_test_burst(self, sequences: Sequence[int], percent: float, seconds: float) -> None:
+        for sequence in sequences:
+            self.motor_test(int(sequence), percent, seconds)
+
     def set_mode_stabilize(self) -> None:
         self.modes.append("STABILIZE")
 

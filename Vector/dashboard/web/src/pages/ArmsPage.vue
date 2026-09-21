@@ -16,6 +16,7 @@ import PanelCard from '../components/PanelCard.vue'
 import SliderRow from '../components/SliderRow.vue'
 import StatTile from '../components/StatTile.vue'
 import StatusPill from '../components/StatusPill.vue'
+import ToggleRow from '../components/ToggleRow.vue'
 import { armColor, num, signedDeg, us } from '../lib/format'
 import * as kin from '../lib/kinematics'
 import store, { arms, canCommand, commandBlockedReason, isPending, send } from '../lib/store'
@@ -112,6 +113,16 @@ function aimTo(forward: number, right: number) {
 
 const slewSpeed = ref(0)
 
+const oscillating = computed(() => store.state?.outputs.oscillateActive ?? false)
+
+function setOscillate(on: boolean) {
+  send('oscillate', { active: on, arms: targets.value })
+}
+
+watch(selection, () => {
+  if (oscillating.value) setOscillate(true)
+})
+
 /* -------------------------------------------------------------- axis sliders */
 
 const axisTilt = ref<Record<AxisName, number>>({ outer: 0, inner: 0 })
@@ -153,7 +164,7 @@ const pickedMotors = computed(() =>
  * How many motors a click actually spins.
  *
  * The tick boxes name roles, not motors, so "All live arms" with both ticked is four
- * propellers rather than two. They all start together now, which is a number worth
+ * propellers rather than two. They all ramp up together, which is a number worth
  * being honest about before pressing the button.
  */
 const spinCount = computed(() => {
@@ -224,7 +235,7 @@ function spin() {
       <!-- aiming -->
       <PanelCard
         title="Aim"
-        note="Drag inside the envelope. Axes are body frame: up leans thrust forward, right leans it right."
+        note="Drag inside the envelope. Axes are body frame: up leans thrust forward, right leans it right. Circle sweeps the widest lean that stays circular."
         :accent="accent"
       >
         <template #actions>
@@ -295,6 +306,14 @@ function spin() {
               <button :disabled="disabled" @click="aimTo(0, 10)">Right 10&#176;</button>
               <button :disabled="disabled" @click="aimTo(0, -10)">Left 10&#176;</button>
             </div>
+
+            <ToggleRow
+              :model-value="oscillating"
+              :disabled="disabled && !oscillating"
+              label="Circle the envelope"
+              note="Widest body-frame circle the gimbals can hold, one turn every 6 s. Selected arms stay in step."
+              @update:model-value="setOscillate"
+            />
           </div>
         </div>
       </PanelCard>
@@ -408,11 +427,16 @@ function spin() {
       <!-- motors -->
       <PanelCard
         title="Motors"
-        note="Selected motors are latched one after another through the motor test, then held together. A click can take a second to bring the whole set up. Clear the props, or take them off."
+        note="Selected motors ramp up together to the target throttle. Clear the props, or take them off."
         :accent="accent"
       >
         <template #actions>
-          <button class="danger tiny" :disabled="!canCommand" @click="send('stop_motors')">
+          <button
+            class="danger tiny"
+            :disabled="!canCommand"
+            title="Zero every motor test. The X key does the same from any page."
+            @click="send('stop_motors')"
+          >
             Stop
           </button>
         </template>
@@ -475,9 +499,9 @@ function spin() {
             :disabled="disabled || !spinCount || isPending('spin_motors')"
             @click="spin"
           >
-            Spin {{ spinCount || 'no' }}
+            Ramp {{ spinCount || 'no' }}
             {{ spinCount === 1 ? 'motor' : 'motors together' }}
-            at {{ motorPercent }}% for {{ motorSeconds }}s
+            to {{ motorPercent }}% for {{ motorSeconds }}s
           </button>
         </div>
       </PanelCard>

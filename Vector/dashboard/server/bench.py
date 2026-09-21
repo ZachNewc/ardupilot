@@ -14,6 +14,7 @@ once. See ``outputs.OutputArbiter``.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -29,9 +30,21 @@ from .outputs import LinkBudget, OutputArbiter, link_budget
 OWNER_MANUAL = "manual"
 OWNER_LIVE = "live"
 OWNER_STABILIZE = "stabilize"
+OWNER_OSCILLATE = "oscillate"
+
+# One revolution of the envelope circle. Slow enough that hobby servos keep the
+# thrust on the circle instead of lagging into a smaller ellipse.
+OSCILLATE_PERIOD_S = 6.0
+# Seconds to grow from the current lean out to full radius, so the toggle does
+# not slam the linkages to the rim.
+OSCILLATE_RAMP_S = 1.5
 
 # DShot reverse direction is asserted through BLHeli passthrough.
 DSHOT_ESC_BLHELI = 1
+# MOT_PWM_TYPE 6 is DShot600. OneShot (1) never sets the T-wire request bit.
+MOT_PWM_TYPE_DSHOT600 = 6.0
+# SERVO_BLH_AUTO attaches BLHeli to every multicopter motor at boot.
+SERVO_BLH_AUTO_ENABLE = 1.0
 
 # SERVOn_FUNCTION values for Motor1..Motor8.
 FUNC_MOTOR_FIRST = 33
@@ -68,10 +81,32 @@ SPIN_REFRESH_HZ = 10.0
 
 # Motor test writes one mixer slot per main-loop pass. A burst of COMMAND_LONG
 # on USB finishes in a few milliseconds, so most slots never get a cycle and
-# the set comes up at random. Wait for soft-arm/interlock on the first, then
-# long enough for several output cycles after each of the rest.
-MOTOR_TEST_ARM_S = 0.4
-MOTOR_TEST_LATCH_S = 0.1
+# the set comes up at random. The firmware now keeps a mask of test motors and
+# writes every bit on one output cycle, so the dashboard sends the set as one
+# burst instead of waiting between them.
+#
+# Throttle still has to climb. A single command at the asked percent is a slam
+# from stopped, which on an unloaded bench motor sounds like far more than it
+# is. Every selected sequence shares each step so the rotors spool together.
+MOTOR_TEST_RAMP_S = 2.0
+MOTOR_TEST_RAMP_HZ = 20.0
+
+
+def motor_test_ramp_steps(percent: float, seconds: float) -> Tuple[float, Tuple[float, ...]]:
+    """
+    Percents to send, climbing together from stopped to ``percent``.
+
+    The ramp is capped at three-quarters of the test so a short spin still ends
+    on time. The last value is always the target.
+    """
+    target = float(percent)
+    if target <= 0.0:
+        return 0.0, (0.0,)
+    ramp_s = min(MOTOR_TEST_RAMP_S, max(0.0, float(seconds) * 0.75))
+    steps = max(1, int(round(ramp_s * MOTOR_TEST_RAMP_HZ)))
+    if steps <= 1:
+        return 0.0, (target,)
+    return ramp_s, tuple(target * (index / steps) for index in range(1, steps + 1))
 
 
 @dataclass(frozen=True)
@@ -109,6 +144,8 @@ class Bench:
         self._motor_test_until = 0.0
         self._spin_stop = threading.Event()
         self._spin_thread: Optional[threading.Thread] = None
+        self._oscillate_stop = threading.Event()
+        self._oscillate_thread: Optional[threading.Thread] = None
         self.outputs = OutputArbiter(
             send=self.link.set_servo_pwm_fast,
             prepare=self._prepare_channels,
@@ -128,6 +165,7 @@ class Bench:
         # A running spin holds channel numbers and motor functions from the old config,
         # so it has to finish putting those back before the new one is in force.
         self._halt_spin()
+        self._halt_oscillate()
         self.outputs.acquire("config-reload")
         self.outputs.release("config-reload")
         self.outputs.forget()
@@ -345,6 +383,108 @@ class Bench:
         who = "All arms" if len(arms) == len(self._cfg.live_arms()) else ", ".join(a.id for a in arms)
         return self.link.note(f"{who} centered")
 
+    def start_oscillate(self, arm_ids: Optional[Sequence[str]]) -> str:
+        """
+        Sweep the named arms around the widest body-frame circle they can hold.
+
+        That circle is ``uniform_tilt_limit`` — the inscribed radius of the tilt
+        envelope. Anything larger is only reachable on some azimuths, so the path
+        would flatten into the square. Every selected arm tracks the same lean, which
+        is the same check as All fwd 10: they should all go around together.
+        """
+        self.link.require()
+        arms = self.resolve_arms(arm_ids)
+        radius = min(kin.uniform_tilt_limit(arm.gimbal) for arm in arms)
+        if radius <= 0.0:
+            raise ValueError("no reachable tilt on the selected arms")
+
+        state = self.arm_state(arms[0])
+        start_r = math.hypot(state.forward_deg, state.right_deg)
+        start_angle = (
+            math.atan2(state.right_deg, state.forward_deg) if start_r > 0.25 else 0.0
+        )
+
+        self._halt_oscillate()
+        with self._lock:
+            self._oscillate_stop.clear()
+            self._oscillate_thread = threading.Thread(
+                target=self._oscillate_worker,
+                args=(tuple(arm.id for arm in arms), radius, start_r, start_angle),
+                name="vector-oscillate",
+                daemon=True,
+            )
+            self._oscillate_thread.start()
+
+        who = "all arms" if len(arms) == len(self._cfg.live_arms()) else ", ".join(a.id for a in arms)
+        return self.link.note(
+            f"Circling {who} at {radius:.1f} deg, {OSCILLATE_PERIOD_S:.0f}s per turn"
+        )
+
+    def stop_oscillate(self) -> str:
+        stopped = self._halt_oscillate()
+        return self.link.note("Circle off") if stopped else "Circle already off"
+
+    @property
+    def oscillate_active(self) -> bool:
+        thread = self._oscillate_thread
+        return thread is not None and thread.is_alive()
+
+    def _halt_oscillate(self, timeout: float = 1.5) -> bool:
+        with self._lock:
+            thread = self._oscillate_thread
+            self._oscillate_thread = None
+        self._oscillate_stop.set()
+        if thread is None or not thread.is_alive():
+            return False
+        if thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        return True
+
+    def _oscillate_worker(
+        self,
+        arm_ids: Tuple[str, ...],
+        radius_deg: float,
+        start_radius_deg: float,
+        start_angle_rad: float,
+    ) -> None:
+        generation = self.outputs.acquire(OWNER_OSCILLATE)
+        period = 1.0 / max(1.0, self._cfg.bench_limits.command_rate_hz)
+        started = time.monotonic()
+        try:
+            while not self._oscillate_stop.is_set():
+                if not self.link.connected or not self.outputs.holds(generation):
+                    break
+                elapsed = time.monotonic() - started
+                ramp = min(1.0, elapsed / OSCILLATE_RAMP_S)
+                radius = start_radius_deg + (radius_deg - start_radius_deg) * ramp
+                angle = start_angle_rad + (2.0 * math.pi * elapsed / OSCILLATE_PERIOD_S)
+                forward = radius * math.cos(angle)
+                right = radius * math.sin(angle)
+
+                targets: Dict[int, int] = {}
+                for arm_id in arm_ids:
+                    try:
+                        arm = self._cfg.arm(arm_id)
+                    except Exception:
+                        continue
+                    if not arm.live:
+                        continue
+                    answer = kin.solve_thrust_lean(arm, forward, right)
+                    for channel, pwm in answer.pwm():
+                        if channel_assigned(channel):
+                            targets[channel] = pwm
+                if not targets or not self.outputs.write(targets, generation):
+                    break
+                self._oscillate_stop.wait(period)
+        except Exception as exc:
+            self.link.record_error(f"Circle aborted: {exc}")
+        finally:
+            if self.outputs.holds(generation):
+                self.outputs.release(OWNER_OSCILLATE)
+            with self._lock:
+                if self._oscillate_thread is threading.current_thread():
+                    self._oscillate_thread = None
+
     # ------------------------------------------------------------------
     # outputs and mapping
     # ------------------------------------------------------------------
@@ -367,8 +507,13 @@ class Bench:
           Unclaimed ones are auto-assigned to S1, S2, ... on the next boot, which
           puts DShot on the North gimbal timer. Planned East/West motors occupy
           those slots on the DShot groups so the servo pins stay PWM.
-        * **ESC telemetry UARTs are protocol 16.** RX3 is SERIAL4 and RX4 is
-          SERIAL6 on this board. A change only takes effect at boot.
+        * **ESC telemetry UARTs are protocol 16.** On this board RX4 is SERIAL6
+          and RX6 is SERIAL7. A change only takes effect at boot. RX6 is also
+          the default RC input, so opening it as a UART moves the receiver off
+          that pin.
+        * **MOT_PWM_TYPE is DShot600 and SERVO_BLH_AUTO is on.** T-wire is
+          requested only while those motor outputs are digital and BLHeli has
+          attached to them. Both take effect at boot.
         """
         self.link.require()
         self.link.forget_servo_functions()
@@ -437,9 +582,13 @@ class Bench:
         # is reported by the board but not acted on. Without this comparison, editing
         # `reversed` in the config looks applied and changes nothing on the ESC.
         live_mask = self.link.get_param("SERVO_BLH_RVMASK")
+        live_pwm_type = self.link.get_param("MOT_PWM_TYPE")
+        live_blh_auto = self.link.get_param("SERVO_BLH_AUTO")
 
         self.link.set_param("SERVO_DSHOT_ESC", DSHOT_ESC_BLHELI)
+        self.link.set_param("SERVO_BLH_AUTO", SERVO_BLH_AUTO_ENABLE)
         self.link.set_param("SERVO_BLH_RVMASK", float(reverse_mask))
+        self.link.set_param("MOT_PWM_TYPE", MOT_PWM_TYPE_DSHOT600)
 
         text = (
             f"Output mapping asserted: {len(motors_mapped)} motor channels, "
@@ -459,6 +608,17 @@ class Bench:
                 f"SERVO_BLH_RVMASK was 0x{int(live_mask):X}, config wants "
                 f"0x{reverse_mask:X}. Motor direction only changes at boot, so reboot "
                 "the flight controller before trusting which way anything spins."
+            )
+        if live_pwm_type is not None and int(live_pwm_type) != int(MOT_PWM_TYPE_DSHOT600):
+            self.link.record_error(
+                f"MOT_PWM_TYPE was {int(live_pwm_type)} (not DShot600). "
+                "BLHeli only requests T-wire telemetry on DShot outputs, so reboot "
+                "the flight controller before expecting ESC data on RX4/RX6."
+            )
+        if live_blh_auto is not None and int(live_blh_auto) != int(SERVO_BLH_AUTO_ENABLE):
+            self.link.record_error(
+                "SERVO_BLH_AUTO was 0, so BLHeli never attached to the motor outputs. "
+                "It is set now; reboot so T-wire requests start."
             )
         if stale:
             self.link.record_error(
@@ -504,10 +664,14 @@ class Bench:
         """
         Open every configured UART as ESC telemetry.
 
-        On Matek H743, RX3 is SERIAL4 (USART3) and RX4 is SERIAL6 (UART4). Stock
+        On Matek H743, RX4 is SERIAL6 (UART4) and RX6 is SERIAL7 (USART6). Stock
         ArduPilot used to consume only the first protocol-16 port; AP_BLHeli now
         reads every instance so both T-wire buses report. The protocol itself is
         applied at SerialManager init, so a change here needs a reboot.
+
+        RX6 is TIM3 RCIN by default. SERIAL7_PROTOCOL = 16 selects the UART
+        alternate on that pad, which is required for the T-wire and which
+        removes RC input from that pin.
         """
         serials = list(self._cfg.link.esc_telemetry_serials)
         if not serials:
@@ -521,14 +685,23 @@ class Bench:
             if live is not None and int(live) != int(SERIAL_PROTOCOL_ESC_TELEM):
                 changed.append(name)
 
-        names = ", ".join(f"SERIAL{n}" for n in serials)
+        pads = ", ".join(
+            f"SERIAL{n} ({board.serial_rx_pad(n)})" for n in serials
+        )
         if changed:
+            extra = ""
+            if board.RCIN_SERIAL in serials:
+                extra = (
+                    f" SERIAL{board.RCIN_SERIAL} is the default RC input "
+                    f"({board.serial_rx_pad(board.RCIN_SERIAL)}); that pin is a "
+                    "UART only after this protocol takes effect."
+                )
             self.link.record_error(
                 f"{', '.join(changed)} was not ESC Telemetry (16). "
                 "Serial protocol is applied at boot, so reboot before expecting "
-                "ESC telemetry on RX3/RX4."
+                f"ESC telemetry on {pads}.{extra}"
             )
-        return f"ESC telemetry on {names}"
+        return f"ESC telemetry on {pads}"
 
     def _servo_bit(self, channel: int) -> int:
         return 1 << (int(channel) - 1)
@@ -807,7 +980,7 @@ class Bench:
         seconds: float,
     ) -> str:
         """
-        Spin every selected motor at once, at one throttle, for one duration.
+        Spin every selected motor at once, climbing to one throttle together.
 
         These ESCs are DShot and DroneCAN. DO_SET_SERVO cannot turn them, and
         force-arming Stabilize does not either -- the mixer sees a bench with
@@ -815,10 +988,11 @@ class Bench:
         already spun them: it soft-arms, suppresses failsafes in RAM, and
         writes each mixer slot.
 
-        ``output_test_seq`` only updates the requested slot. It does not zero
-        the others, so each selected sequence is started and given a main-loop
-        cycle to latch, then the next is started without a zero in between.
-        A USB burst with no gap is why a click used to spin a random subset.
+        The flight controller takes a bitmask of every selected sequence in
+        one DO_MOTOR_TEST and writes them on one output cycle. A command per
+        motor was dropping slots -- North top (seq 2) and South top (seq 6)
+        spun when asked alone and stayed off in the full set. Throttle is
+        stepped up on that same mask so every rotor sees the same percent.
         """
         self.link.require()
         self._disarm_for_bench()
@@ -876,14 +1050,9 @@ class Bench:
             raise ValueError("no matching motors on the selected arms")
 
         self._halt_spin()
-        budget = (
-            MOTOR_TEST_ARM_S
-            + MOTOR_TEST_LATCH_S * len(sequences) * 2
-            + seconds
-        )
         with self._lock:
             self._spin_stop.clear()
-            self._motor_test_until = time.time() + budget
+            self._motor_test_until = time.time() + seconds + 1.0
             self._spin_thread = threading.Thread(
                 target=self._spin_motor_test_burst,
                 args=(tuple(sequences), percent, seconds),
@@ -893,6 +1062,11 @@ class Bench:
             self._spin_thread.start()
 
         listing = ", ".join(f"{target.arm_id}.{target.role}" for target in targets)
+        ramp_s, _ = motor_test_ramp_steps(percent, seconds)
+        if ramp_s > 0.0:
+            return self.link.note(
+                f"Ramping {listing} together to {percent:.1f}% for {seconds:.1f}s"
+            )
         return self.link.note(
             f"Spinning {listing} together at {percent:.1f}% for {seconds:.1f}s"
         )
@@ -904,13 +1078,12 @@ class Bench:
         seconds: float,
     ) -> None:
         """
-        Latch every selected slot, then hold, then stop once.
+        Climb every selected slot together, then hold, then stop once.
 
-        The first command is what soft-arms and turns interlock on. Commands
-        sent before that write ``output_min`` to every motor. Each later
-        command is held long enough for the loop to ``rc_write`` that slot
-        so its pulse survives when the sequence moves on. The set is sent
-        twice so one dropped COMMAND_LONG does not leave a hole.
+        The mask travels in param 6 of a single DO_MOTOR_TEST so North top
+        and South top cannot fall out of a USB burst the way they did when
+        each mixer slot was a separate command. Each throttle step reuses
+        that mask: the percent changes, the set of motors does not.
         """
         try:
             self.link.forget_servo_functions()
@@ -921,18 +1094,24 @@ class Bench:
                     pass
             if self._spin_stop.wait(0.05):
                 return
-            n = len(sequences)
-            budget = MOTOR_TEST_ARM_S + MOTOR_TEST_LATCH_S * n * 2 + seconds
-            for index, sequence in enumerate(list(sequences) + list(sequences)):
+            ramp_s, percents = motor_test_ramp_steps(percent, seconds)
+            started = time.time()
+            with self._lock:
+                self._motor_test_until = started + seconds
+            count = len(percents)
+            for index, current in enumerate(percents):
                 if self._spin_stop.is_set():
                     return
-                self.link.motor_test(sequence, percent, budget)
-                pause = MOTOR_TEST_ARM_S if index == 0 else MOTOR_TEST_LATCH_S
-                if self._spin_stop.wait(pause):
-                    return
-            with self._lock:
-                self._motor_test_until = time.time() + seconds
-            self._spin_stop.wait(seconds)
+                remaining = max(0.25, seconds - (time.time() - started))
+                self.link.motor_test_burst(sequences, current, remaining)
+                if index + 1 < count and ramp_s > 0.0:
+                    due = started + ramp_s * (index + 1) / count
+                    delay = max(0.0, due - time.time())
+                    if self._spin_stop.wait(delay):
+                        return
+            hold = seconds - (time.time() - started)
+            if hold > 0.0:
+                self._spin_stop.wait(hold)
         except Exception as exc:
             self.link.record_error(f"Motor spin aborted: {exc}")
         finally:
@@ -1347,6 +1526,7 @@ class Bench:
         # Before the arbiter, so the spin worker can still reach the link to stop the
         # motors and hand their channels back.
         self._halt_spin()
+        self._halt_oscillate()
         self.outputs.stop()
         self.link.disconnect()
 

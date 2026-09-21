@@ -13,7 +13,7 @@ the airframe is facing.
 | 03 | [Kinematics](03-kinematics.md) | The full geometry: tilt to servo, tilt to thrust, and the limits |
 | 04 | [Control](04-control.md) | Where each control loop lives and why |
 | 05 | [Firmware](05-firmware.md) | The ArduPilot side: parameters, mixer plan, what is not written yet |
-| 06 | [Dashboard](06-dashboard.md) | Running it, the seven pages, the architecture |
+| 06 | [Dashboard](06-dashboard.md) | Running it, the pages, the architecture |
 | 07 | [Configuration](07-configuration.md) | `vector.json` field by field, and how to add an arm |
 | 08 | [Bench testing](08-bench-testing.md) | Procedures, in the order you should do them |
 | 09 | [Safety](09-safety.md) | Hazards specific to this airframe. Read before powering anything |
@@ -53,8 +53,9 @@ Vector/
 ```
 
 Everything Vector-specific lives under `Vector/`. The surrounding tree stays close
-to upstream ArduPilot; the one firmware delta is `AP_BLHeli` reading every ESC
-telemetry UART so RX3 and RX4 both report.
+to upstream ArduPilot. Firmware deltas: `AP_BLHeli` reads every ESC telemetry UART
+so RX4 and RX6 both report, and Copter's motor test writes every started sequence
+on one output cycle.
 
 ## Quick start
 

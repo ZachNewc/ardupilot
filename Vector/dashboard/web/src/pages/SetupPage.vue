@@ -629,6 +629,11 @@ function removeArm(index: number) {
               />
             </label>
           </div>
+          <p class="faint small">
+            SERIALn indexes, comma-separated. On this board 6 is RX4 and 7 is RX6.
+            Connect writes <code>SERIALn_PROTOCOL</code> 16; that takes effect at
+            boot. RX6 is the default RC input until SERIAL7 is a UART.
+          </p>
 
           <div v-if="draft.bench_limits" class="field-grid">
             <label>

@@ -15,7 +15,7 @@
 
 ## Verified on hardware
 
-- ESC telemetry on RX4, `SERIAL6_PROTOCOL` 16 (single UART; both RX3 and RX4 are now configured)
+- ESC telemetry on RX4 and RX6, `SERIAL6_PROTOCOL` and `SERIAL7_PROTOCOL` 16
 - DShot600 with a reversed top motor via BLHeli passthrough
 - `MAV_CMD_DO_MOTOR_TEST` sequences 1 and 3 under QUAD / X (North, on the previous S3/S4 wiring)
 

@@ -173,7 +173,7 @@ class KinematicsTest(unittest.TestCase):
 
         inner_only = kin.servo_deg_for_tilt(self.north.gimbal, 0.0, 22.5)
         self.close(inner_only[0], 0.0)
-        self.close(inner_only[1], 45.0)
+        self.close(inner_only[1], -45.0)
 
     def test_pwm_scale_is_500_to_2500_over_180_degrees(self) -> None:
         axis = self.north.gimbal.inner
@@ -267,8 +267,8 @@ class KinematicsTest(unittest.TestCase):
                 trim_deg=10.0,
             ),
         )
-        self.close(kin.max_scale(self.north.gimbal, -22.5, 22.5), 1.0)
-        self.assertLess(kin.max_scale(trimmed, -22.5, 22.5), 1.0)
+        self.close(kin.max_scale(self.north.gimbal, -22.5, -22.5), 1.0)
+        self.assertLess(kin.max_scale(trimmed, -22.5, -22.5), 1.0)
 
     def test_workspace_outline_traces_the_tilt_square(self) -> None:
         limit = self.north.gimbal.tilt_limit_deg

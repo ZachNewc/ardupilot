@@ -708,13 +708,14 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_MAV_CMD_DO_MOTOR_TEST(const mavlink_comman
         // param3 : throttle (range depends upon param2)
         // param4 : timeout (in seconds)
         // param5 : num_motors (in sequence)
-        // param6 : motor test order
+        // param6 : bitmask of test sequences to run together (bit 0 = sequence 1)
         return copter.mavlink_motor_test_start(*this,
                                                (uint8_t)packet.param1,
                                                (uint8_t)packet.param2,
                                                packet.param3,
                                                packet.param4,
-                                               (uint8_t)packet.x);
+                                               (uint8_t)packet.x,
+                                               (uint32_t)packet.y);
 }
 
 #if AP_WINCH_ENABLED

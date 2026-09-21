@@ -217,6 +217,12 @@ export interface VehicleState {
   pitchRateDegS: number
   yawRateDegS: number
   rateMagnitudeDegS: number
+  /** IMU specific force in g, body NED. At rest Z is about +1, not 0. */
+  accelXg: number
+  accelYg: number
+  accelZg: number
+  /** Age of the newest IMU accel sample. Null before SCALED_IMU has arrived. */
+  accelAgeS: number | null
   voltage: number
   current: number
   batteryRemaining: number
@@ -285,11 +291,19 @@ export interface ControllerState {
   maxTiltFraction: number
   invertRoll: boolean
   invertPitch: boolean
+  accelGainDegG: number
+  accelDeadbandG: number
+  invertAccelX: boolean
+  invertAccelY: boolean
   tiltCapDeg: number
   /** What the loop is currently commanding. Zero when it is not running. */
   target: LeanState
-  /** What the law would command right now, running or not. */
+  /** What the gyro levelling law would command right now, running or not. */
   preview: LeanState & { saturated: boolean }
+  /** What the accel-hold law would command right now, running or not. */
+  accelPreview: LeanState & { saturated: boolean }
+  /** Gravity-compensated linear accel in g. Zero until an IMU sample has arrived. */
+  linearAccelG: { x: number; y: number; z: number; horizontal: number }
   saturated: boolean
   loopHz: number
   updates: number
@@ -301,6 +315,7 @@ export interface OutputsState {
   owner: string | null
   rampActive: boolean
   motorTestActive: boolean
+  oscillateActive: boolean
 }
 
 export interface EventItem {

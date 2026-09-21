@@ -25,18 +25,29 @@ from pymavlink import mavutil
 FUNC_DISABLED = 0
 FUNC_MOTOR1 = 33
 
+# First ESC number in each MAVLink group. CAN ESCs on S14–S17 land in 13–20.
+ESC_TELEMETRY_BASE = {
+    "ESC_TELEMETRY_1_TO_4": 1,
+    "ESC_TELEMETRY_5_TO_8": 5,
+    "ESC_TELEMETRY_9_TO_12": 9,
+    "ESC_TELEMETRY_13_TO_16": 13,
+    "ESC_TELEMETRY_17_TO_20": 17,
+    "ESC_TELEMETRY_21_TO_24": 21,
+    "ESC_TELEMETRY_25_TO_28": 25,
+    "ESC_TELEMETRY_29_TO_32": 29,
+}
+
 # Telemetry we ask the flight controller to stream, and how often, in microseconds.
 STREAM_INTERVALS_US = {
     "HEARTBEAT": 500000,
     "ATTITUDE": 25000,
+    "SCALED_IMU": 25000,
     "VFR_HUD": 200000,
     "SYS_STATUS": 500000,
     "GPS_RAW_INT": 1000000,
     "SERVO_OUTPUT_RAW": 50000,
     "BATTERY_STATUS": 500000,
-    "ESC_TELEMETRY_1_TO_4": 200000,
-    "ESC_TELEMETRY_5_TO_8": 200000,
-    "ESC_TELEMETRY_9_TO_12": 200000,
+    **{name: 200000 for name in ESC_TELEMETRY_BASE},
 }
 
 EVENT_HISTORY = 60
@@ -87,6 +98,12 @@ class Telemetry:
     roll_rate_dps: float = 0.0
     pitch_rate_dps: float = 0.0
     yaw_rate_dps: float = 0.0
+
+    # IMU specific force in g, body NED. At rest z is approximately +1, not 0.
+    accel_x_g: float = 0.0
+    accel_y_g: float = 0.0
+    accel_z_g: float = 0.0
+    accel_at: float = 0.0
 
     alt_m: float = 0.0
     throttle: int = 0
@@ -351,6 +368,13 @@ class MavlinkLink:
         snap.pitch_rate_dps = math.degrees(msg.pitchspeed)
         snap.yaw_rate_dps = math.degrees(msg.yawspeed)
 
+    def _on_scaled_imu(self, snap: Telemetry, msg: Any) -> None:
+        """SCALED_IMU / RAW_IMU accel is millig in body NED: x forward, y right, z down."""
+        snap.accel_x_g = float(msg.xacc) / 1000.0
+        snap.accel_y_g = float(msg.yacc) / 1000.0
+        snap.accel_z_g = float(msg.zacc) / 1000.0
+        snap.accel_at = time.time()
+
     def _on_vfr_hud(self, snap: Telemetry, msg: Any) -> None:
         snap.alt_m = msg.alt
         snap.throttle = msg.throttle
@@ -384,25 +408,34 @@ class MavlinkLink:
 
     def _on_esc_telemetry(self, snap: Telemetry, msg: Any) -> None:
         kind = msg.get_type()
-        base = {"ESC_TELEMETRY_1_TO_4": 1, "ESC_TELEMETRY_5_TO_8": 5, "ESC_TELEMETRY_9_TO_12": 9}[kind]
+        base = ESC_TELEMETRY_BASE.get(kind)
+        if base is None:
+            return
         voltage = getattr(msg, "voltage", None)
         current = getattr(msg, "current", None)
         rpm = getattr(msg, "rpm", None)
         temperature = getattr(msg, "temperature", None)
+        count = getattr(msg, "count", None)
         for i in range(4):
             volts = float(voltage[i]) / 100.0 if voltage is not None else 0.0
-            # An unpopulated slot reports all zeros; skip it so the UI only lists
-            # ESCs that are really reporting.
-            if volts <= 0.0:
+            amps = float(current[i]) / 100.0 if current is not None else 0.0
+            revs = float(rpm[i]) if rpm is not None else 0.0
+            temp = float(temperature[i]) if temperature is not None else 0.0
+            packets = float(count[i]) if count is not None else 0.0
+            # An unpopulated slot reports all zeros. Voltage alone is a bad gate:
+            # a spinning ESC can still send 0 V while RPM or temperature is real.
+            # count > 0 means the backend has accepted packets even if they are idle.
+            if volts <= 0.0 and amps <= 0.0 and revs <= 0.0 and temp <= 0.0 and packets <= 0.0:
                 continue
             index = base + i
-            snap.esc_voltage[index] = volts
-            if rpm is not None:
-                snap.esc_rpm[index] = float(rpm[i])
-            if current is not None:
-                snap.esc_current[index] = float(current[i]) / 100.0
-            if temperature is not None:
-                snap.esc_temp[index] = float(temperature[i])
+            if volts > 0.0:
+                snap.esc_voltage[index] = volts
+            if rpm is not None and revs > 0.0:
+                snap.esc_rpm[index] = revs
+            if current is not None and amps > 0.0:
+                snap.esc_current[index] = amps
+            if temperature is not None and temp > 0.0:
+                snap.esc_temp[index] = temp
 
     def _on_status_text(self, snap: Telemetry, msg: Any) -> None:
         text = msg.text
@@ -446,6 +479,9 @@ class MavlinkLink:
         "HEARTBEAT": _on_heartbeat,
         "PARAM_VALUE": _on_param_value,
         "ATTITUDE": _on_attitude,
+        "SCALED_IMU": _on_scaled_imu,
+        "SCALED_IMU2": _on_scaled_imu,
+        "RAW_IMU": _on_scaled_imu,
         "VFR_HUD": _on_vfr_hud,
         "SYS_STATUS": _on_sys_status,
         "BATTERY_STATUS": _on_battery_status,
@@ -454,6 +490,11 @@ class MavlinkLink:
         "ESC_TELEMETRY_1_TO_4": _on_esc_telemetry,
         "ESC_TELEMETRY_5_TO_8": _on_esc_telemetry,
         "ESC_TELEMETRY_9_TO_12": _on_esc_telemetry,
+        "ESC_TELEMETRY_13_TO_16": _on_esc_telemetry,
+        "ESC_TELEMETRY_17_TO_20": _on_esc_telemetry,
+        "ESC_TELEMETRY_21_TO_24": _on_esc_telemetry,
+        "ESC_TELEMETRY_25_TO_28": _on_esc_telemetry,
+        "ESC_TELEMETRY_29_TO_32": _on_esc_telemetry,
         "STATUSTEXT": _on_status_text,
         "COMMAND_ACK": _on_command_ack,
     }
@@ -565,6 +606,33 @@ class MavlinkLink:
             float(percent),
             float(seconds),
         )
+
+    def motor_test_burst(self, sequences: Sequence[int], percent: float, seconds: float) -> None:
+        """
+        Start every selected mixer slot with one DO_MOTOR_TEST.
+
+        Param 6 is a bitmask (bit 0 = sequence 1). A burst of one command per
+        motor was losing slots on USB -- North top is sequence 2 and South top
+        is sequence 6 -- so those two spun when asked alone and stayed off in
+        the full set. The command is sent twice in case that one frame drops.
+        """
+        seqs = [int(seq) for seq in sequences if int(seq) >= 1]
+        if not seqs:
+            return
+        mask = 0
+        for sequence in seqs:
+            if sequence <= 32:
+                mask |= 1 << (sequence - 1)
+        for _ in range(2):
+            self.command_long(
+                mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST,
+                float(seqs[0]),
+                0.0,  # MOTOR_TEST_THROTTLE_PERCENT
+                float(percent),
+                float(seconds),
+                1.0,  # motor_count: do not walk a sequence
+                float(mask),
+            )
 
     def set_mode_stabilize(self) -> None:
         """Copter Stabilize. Custom mode 0; the mixer then takes throttle from RC."""

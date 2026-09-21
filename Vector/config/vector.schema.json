@@ -232,7 +232,7 @@
         "baud": { "type": "integer", "exclusiveMinimum": 0 },
         "esc_telemetry_serials": {
           "type": "array",
-          "description": "SERIALn indexes that carry BLHeli T-wire telemetry. On the Matek H743-Wing, 4 is RX3 (USART3) and 6 is RX4 (UART4).",
+          "description": "SERIALn indexes that carry BLHeli T-wire telemetry. On the Matek H743-Wing, 6 is RX4 (UART4) and 7 is RX6 (USART6).",
           "items": { "type": "integer", "minimum": 0 },
           "uniqueItems": true
         },

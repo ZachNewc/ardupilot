@@ -42,6 +42,7 @@ class DispatchTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.session.controller.stop()
+        self.session.bench.stop_oscillate()
         self.session.bench.outputs.stop()
 
     def run_command(self, msg):
@@ -116,6 +117,47 @@ class DispatchTest(unittest.TestCase):
             self.assertFalse(reply["ok"])
             self.assertIn("forward", reply["message"])
         finally:
+            session.bench.outputs.stop()
+
+    def test_accel_mode_starts_the_hold_loop(self) -> None:
+        session = build_session(connected=True)
+        try:
+            reply = asyncio.run(
+                dispatch(session, {"command": "level", "active": True, "mode": "accel"})
+            )
+            self.assertTrue(reply["ok"], reply)
+            self.assertIn("Accel hold", reply["message"])
+            self.assertEqual(session.controller.status().mode, "accel")
+            self.assertTrue(session.controller.active)
+        finally:
+            session.controller.stop()
+            session.bench.outputs.stop()
+
+    def test_retuning_the_idle_demo_does_not_stop_the_running_one(self) -> None:
+        """Stabilize sliders must not kill accel hold, and the other way around."""
+        session = build_session(connected=True)
+        try:
+            start = asyncio.run(
+                dispatch(session, {"command": "level", "active": True, "mode": "accel"})
+            )
+            self.assertTrue(start["ok"], start)
+            reply = asyncio.run(
+                dispatch(
+                    session,
+                    {
+                        "command": "level",
+                        "active": False,
+                        "mode": "level",
+                        "levelGain": 0.5,
+                    },
+                )
+            )
+            self.assertTrue(reply["ok"], reply)
+            self.assertIn("Left accel running", reply["message"])
+            self.assertEqual(session.controller.status().mode, "accel")
+            self.assertTrue(session.controller.active)
+        finally:
+            session.controller.stop()
             session.bench.outputs.stop()
 
     def test_config_edits_ask_every_tab_to_reload(self) -> None:

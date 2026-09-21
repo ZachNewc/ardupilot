@@ -22,7 +22,7 @@ from . import board
 from . import config as vconfig
 from . import kinematics as kin
 from .bench import Bench
-from .controller import MODE_LEVEL, LevelController
+from .controller import MODE_LEVEL, MODE_OFF, LevelController
 
 
 class CommandError(ValueError):
@@ -112,6 +112,7 @@ def cmd_connect(session: Session, msg: Dict[str, Any]) -> str:
 
 def cmd_disconnect(session: Session, msg: Dict[str, Any]) -> str:
     session.controller.stop()
+    session.bench.stop_oscillate()
     session.bench.link.disconnect()
     return "Disconnected"
 
@@ -142,6 +143,16 @@ def cmd_live_aim(session: Session, msg: Dict[str, Any]) -> None:
 
 def cmd_live_end(session: Session, msg: Dict[str, Any]) -> None:
     session.bench.end_live_aim()
+
+
+def cmd_oscillate(session: Session, msg: Dict[str, Any]) -> str:
+    """Sweep selected arms around the widest circular lean they can hold."""
+    if not bool(msg.get("active", False)):
+        return session.bench.stop_oscillate()
+    if not session.bench.link.connected:
+        raise CommandError("Not connected to a flight controller")
+    session.controller.stop()
+    return session.bench.start_oscillate(_arms(msg))
 
 
 def cmd_set_axis(session: Session, msg: Dict[str, Any]) -> str:
@@ -195,11 +206,15 @@ def cmd_probe_output(session: Session, msg: Dict[str, Any]) -> str:
 # ----------------------------------------------------------------------------
 def cmd_level(session: Session, msg: Dict[str, Any]) -> str:
     """
-    Start, stop or retune the levelling demo.
+    Start, stop or retune a bench levelling or accel-hold demo.
 
     Not gated on ``needs_link``, because stopping and retuning must work whether or
     not a link is up -- only starting needs the vehicle, and that is checked below so
     the operator gets a plain sentence instead of a raised exception name.
+
+    ``mode`` selects the law (``level`` or ``accel``). Stopping without a mode stops
+    whichever demo is running; stopping with the other mode leaves it alone so a
+    slider on the idle page cannot kill the active one.
     """
     session.controller.configure(
         level_gain=msg.get("levelGain"),
@@ -207,14 +222,25 @@ def cmd_level(session: Session, msg: Dict[str, Any]) -> str:
         max_tilt_fraction=msg.get("maxTiltFraction"),
         invert_roll=msg.get("invertRoll"),
         invert_pitch=msg.get("invertPitch"),
+        accel_gain_deg_g=msg.get("accelGainDegG"),
+        accel_deadband_g=msg.get("accelDeadbandG"),
+        invert_accel_x=msg.get("invertAccelX"),
+        invert_accel_y=msg.get("invertAccelY"),
     )
     if not bool(msg.get("active", False)):
+        requested = msg.get("mode")
+        current = session.controller.status().mode
+        # A retune from the idle page must not kill the other demo. Stop with no
+        # mode, or with the running mode, still means stop.
+        if requested is not None and current not in (MODE_OFF, str(requested)):
+            return f"Left {current} running"
         return session.controller.stop()
 
     if not session.bench.link.connected:
         raise CommandError("Not connected to a flight controller")
     if not session.bench.config.live_arms():
         raise CommandError("No arms are marked live in the config")
+    session.bench.stop_oscillate()
     return session.controller.start(_str(msg, "mode", MODE_LEVEL))
 
 
@@ -281,13 +307,14 @@ COMMANDS: Dict[str, Command] = {
         Command("aim", cmd_aim, True, "Point thrust at a body-frame lean"),
         Command("live_aim", cmd_live_aim, True, "Streamed aim while dragging; unacked"),
         Command("live_end", cmd_live_end, False, "Release the outputs after a drag"),
+        Command("oscillate", cmd_oscillate, False, "Sweep gimbals around the envelope circle"),
         Command("set_axis", cmd_set_axis, True, "Drive one gimbal axis to an angle"),
         Command("set_tilt", cmd_set_tilt, True, "Drive both gimbal axes of one arm"),
         Command("center", cmd_center, True, "Return gimbals to zero tilt"),
         Command("spin_motors", cmd_spin_motors, True, "Run a bounded motor test"),
         Command("stop_motors", cmd_stop_motors, True, "Cancel any running motor test"),
         Command("probe_output", cmd_probe_output, True, "Spin or sweep one SERVO pin to confirm the wiring"),
-        Command("level", cmd_level, False, "Start, stop or retune the levelling demo"),
+        Command("level", cmd_level, False, "Start, stop or retune a bench levelling or accel-hold demo"),
         Command("get_config", cmd_get_config, False, "Send the vehicle config and derived geometry"),
         Command("save_config", cmd_save_config, False, "Validate and persist a config edit"),
         Command("reload_config", cmd_reload_config, False, "Re-read the config file from disk"),

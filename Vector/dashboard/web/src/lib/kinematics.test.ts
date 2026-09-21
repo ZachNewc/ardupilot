@@ -16,9 +16,11 @@ import golden from '~tests/golden_kinematics.json'
 import vehicle from '../../../../config/vector.json'
 import {
   bodyTiltToGimbal,
+  desiredAccelLean,
   desiredLean,
   gimbalForThrustLean,
   gimbalToBodyTilt,
+  gravityDownInBody,
   maxScale,
   solve,
   thrustLean,
@@ -135,18 +137,18 @@ describe('conventions', () => {
     expect(usToDeg(north.gimbal.inner, 2500)).toBeCloseTo(90, 3)
   })
 
-  it('the inner servo needs its full 90 degrees at one pair of corners', () => {
+    it('the inner servo needs its full 90 degrees at one pair of corners', () => {
     // The coupling term either adds to or cancels the inner axis' own travel,
-    // depending on the sign of the outer tilt. With outer.sign = -1 and
-    // coupling = +1, opposite-sign corners stack to the servo's mechanical stop
-    // and same-sign corners cancel to centre. This is what sizes the hardware:
+    // depending on the sign of the outer tilt. With outer.sign = inner.sign = -1
+    // and coupling = +1, same-sign corners stack to the servo's mechanical stop
+    // and opposite-sign corners cancel to centre. This is what sizes the hardware:
     // the inner servo must have twice the outer's travel even though both axes
     // move the same 22.5 degrees.
-    expect(solve(north.gimbal, 22.5, -22.5).inner.servoDeg).toBeCloseTo(-90, 6)
-    expect(solve(north.gimbal, -22.5, 22.5).inner.servoDeg).toBeCloseTo(90, 6)
-    expect(solve(north.gimbal, 22.5, -22.5).inner.atLimit).toBe(true)
+    expect(solve(north.gimbal, 22.5, 22.5).inner.servoDeg).toBeCloseTo(-90, 6)
+    expect(solve(north.gimbal, -22.5, -22.5).inner.servoDeg).toBeCloseTo(90, 6)
+    expect(solve(north.gimbal, 22.5, 22.5).inner.atLimit).toBe(true)
 
-    expect(solve(north.gimbal, 22.5, 22.5).inner.servoDeg).toBeCloseTo(0, 6)
+    expect(solve(north.gimbal, 22.5, -22.5).inner.servoDeg).toBeCloseTo(0, 6)
   })
 
   it('an over-range request is scaled, not clipped', () => {
@@ -245,5 +247,45 @@ describe('levelling law mirrors the server', () => {
   it('lead time extrapolates the attitude', () => {
     const out = desiredLean({ ...law, leadTimeS: 0.1 }, 0, 0, 0, 50)
     expect(out.forward).toBeCloseTo(5, 1)
+  })
+})
+
+describe('accel oppose law mirrors the server', () => {
+  const law = {
+    accelGainDegG: 40,
+    accelDeadbandG: 0,
+    invertAccelX: false,
+    invertAccelY: false,
+    tiltCapDeg: 22.5,
+    maxTiltFraction: 1,
+  }
+
+  it('rest at level needs no lean', () => {
+    const out = desiredAccelLean(law, [0, 0, 1], 0, 0)
+    expect(out.forward).toBeCloseTo(0, 12)
+    expect(out.right).toBeCloseTo(0, 12)
+    expect(out.saturated).toBe(false)
+  })
+
+  it('a static tilt is not a shove', () => {
+    const pitch = 10
+    const [gx, gy, gz] = gravityDownInBody(0, pitch)
+    const out = desiredAccelLean(law, [gx, gy, gz], 0, pitch)
+    expect(out.forward).toBeCloseTo(0, 6)
+    expect(out.right).toBeCloseTo(0, 6)
+  })
+
+  it('a forward shove leans the motors aft, a right shove leans them left', () => {
+    expect(desiredAccelLean(law, [0.2, 0, 1], 0, 0).forward).toBeCloseTo(-8, 6)
+    expect(desiredAccelLean(law, [0, 0.2, 1], 0, 0).right).toBeCloseTo(-8, 6)
+  })
+
+  it('caps a large shove without rotating it', () => {
+    const out = desiredAccelLean(law, [2, 0.5, 1], 0, 0)
+    expect(out.saturated).toBe(true)
+    expect(Math.hypot(out.forward, out.right)).toBeCloseTo(22.5, 6)
+    expect(out.forward).toBeLessThan(0)
+    expect(out.right).toBeLessThan(0)
+    expect(out.forward / out.right).toBeCloseTo(2 / 0.5, 6)
   })
 })

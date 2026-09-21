@@ -17,12 +17,33 @@ import store, { arms, isPending, linkUp, send } from '../lib/store'
 
 const HISTORY = 240
 
+/** Matek H743-Wing silk labels for the SERIALn indexes this vehicle uses. */
+const SERIAL_RX_PAD: Record<number, string> = {
+  4: 'RX3',
+  5: 'RX8',
+  6: 'RX4',
+  7: 'RX6',
+}
+
+const telemSerials = computed(() => store.config?.link.escTelemetrySerials ?? [])
+
 const telemProtocolHint = computed(() => {
-  const serials = store.config?.link.escTelemetrySerials ?? []
-  if (!serials.length) {
+  if (!telemSerials.value.length) {
     return 'SERIALn_PROTOCOL'
   }
-  return serials.map((n) => `SERIAL${n}_PROTOCOL`).join(', ')
+  return telemSerials.value.map((n) => `SERIAL${n}_PROTOCOL`).join(', ')
+})
+
+const telemPadHint = computed(() => {
+  if (!telemSerials.value.length) {
+    return 'the configured RX pads'
+  }
+  return telemSerials.value
+    .map((n) => {
+      const pad = SERIAL_RX_PAD[n]
+      return pad ? `${pad} (SERIAL${n})` : `SERIAL${n}`
+    })
+    .join(' and ')
 })
 
 const history = reactive<Record<string, number[]>>({
@@ -36,6 +57,9 @@ const history = reactive<Record<string, number[]>>({
   current: [],
   leanForward: [],
   leanRight: [],
+  accelX: [],
+  accelY: [],
+  accelZ: [],
 })
 
 function push(key: string, value: number) {
@@ -58,6 +82,9 @@ const stop = watch(
     push('current', state.vehicle.current)
     push('leanForward', state.controller.target.forward)
     push('leanRight', state.controller.target.right)
+    push('accelX', state.vehicle.accelXg)
+    push('accelY', state.vehicle.accelYg)
+    push('accelZ', state.vehicle.accelZg)
   },
 )
 
@@ -66,6 +93,11 @@ onUnmounted(stop)
 const vehicle = computed(() => store.state?.vehicle ?? null)
 const link = computed(() => store.state?.link ?? null)
 const escs = computed(() => store.state?.escs ?? [])
+
+/** CAN expander often forwards RPM with analog fields left at zero. */
+const rpmOnlyEscs = computed(() =>
+  escs.value.filter((esc) => esc.rpm && esc.voltage == null && esc.temperatureC == null),
+)
 
 const attitudeSeries = computed<Series[]>(() => [
   { label: 'roll', color: 'var(--arm-north)', values: history.roll },
@@ -81,6 +113,12 @@ const rateSeries = computed<Series[]>(() => [
 const leanSeries = computed<Series[]>(() => [
   { label: 'fwd', color: 'var(--accent)', values: history.leanForward },
   { label: 'right', color: 'var(--arm-west)', values: history.leanRight },
+])
+
+const accelSeries = computed<Series[]>(() => [
+  { label: 'x', color: 'var(--arm-north)', values: history.accelX },
+  { label: 'y', color: 'var(--arm-east)', values: history.accelY },
+  { label: 'z', color: 'var(--arm-south)', values: history.accelZ },
 ])
 
 const powerSeries = computed<Series[]>(() => [
@@ -170,6 +208,18 @@ const escColors = computed(() => {
           <StatTile label="Roll" :value="num(vehicle?.rollRateDegS, 1)" unit="&#176;/s" />
           <StatTile label="Pitch" :value="num(vehicle?.pitchRateDegS, 1)" unit="&#176;/s" />
           <StatTile label="Yaw" :value="num(vehicle?.yawRateDegS, 1)" unit="&#176;/s" />
+        </div>
+      </PanelCard>
+
+      <PanelCard
+        title="Accelerometer"
+        note="Specific force in body NED, g. Rest is about 0, 0, +1 — not zeros."
+      >
+        <Sparkline :series="accelSeries" unit=" g" :height="110" />
+        <div class="tiles three mt">
+          <StatTile label="X fwd" :value="num(vehicle?.accelXg, 3)" unit=" g" />
+          <StatTile label="Y right" :value="num(vehicle?.accelYg, 3)" unit=" g" />
+          <StatTile label="Z down" :value="num(vehicle?.accelZg, 3)" unit=" g" />
         </div>
       </PanelCard>
 
@@ -290,13 +340,25 @@ const escColors = computed(() => {
             </tr>
           </tbody>
         </table>
+        <p v-if="rpmOnlyEscs.length" class="faint pad" style="margin: 0">
+          {{ rpmOnlyEscs.map((esc) => esc.label).join(', ') }}
+          reporting RPM only. Voltage, current and temperature have to come from
+          that stack's T-wire into the CAN board's telemetry RX — not RX4/RX6.
+        </p>
       </div>
       <div v-else class="pad stack">
         <p class="faint" style="margin: 0">
-          To enable it: connect each DShot ESC's T wire to RX3 (SERIAL4) and RX4
-          (SERIAL6), set those ports'
+          To enable it: connect each DShot ESC's T wire to
+          {{ telemPadHint }}, set
           <code>{{ telemProtocolHint }}</code>
-          to 16 (ESC Telemetry), and reboot. CAN ESCs report over DroneCAN, not these pins.
+          to 16 (ESC Telemetry),
+          <code>MOT_PWM_TYPE</code> to 6 (DShot600) and
+          <code>SERVO_BLH_AUTO</code> to 1, reboot the flight controller, then
+          spin the motors — BLHeli T-wire is requested only while those outputs
+          are live. East/South RPM comes over DroneCAN; their volts and
+          temperature need that 4-in-1's T-wire on the CAN board, not these
+          pins. RX6 is the default RC input; using it as telemetry moves the
+          receiver off that pad.
         </p>
         <StatusPill tone="idle">optional</StatusPill>
       </div>

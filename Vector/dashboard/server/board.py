@@ -46,6 +46,23 @@ from .config import AXIS_NAMES, VehicleConfig, channel_assigned
 # PWM pins the Matek H743-Wing V3 exposes. Anything above this has no local timer.
 BOARD_PWM_CHANNELS = 13
 
+# Silk RX pad for each SERIALn. SERIAL_ORDER on this board is
+# OTG1 UART7 USART1 USART2 USART3 UART8 UART4 USART6 OTG2.
+# SERIAL7 / RX6 is the default RC input; using it as a UART takes that pin.
+SERIAL_RX_PAD = {
+    4: "RX3",
+    5: "RX8",
+    6: "RX4",
+    7: "RX6",
+}
+RCIN_SERIAL = 7
+
+
+def serial_rx_pad(index: int) -> str:
+    """Board silk name for a SERIALn index, or 'SERIALn' if it has no RX pad label."""
+    pad = SERIAL_RX_PAD.get(int(index))
+    return pad if pad else f"SERIAL{int(index)}"
+
 # S13 is TIM1 alone and the hwdef comments it "for WS2812 LED". Usable as a servo pin
 # if the LED is given up, so this is a caution rather than a refusal.
 LED_CHANNEL = 13

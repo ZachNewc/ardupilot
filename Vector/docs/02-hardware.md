@@ -245,8 +245,8 @@ the failure mode under a hard throttle transient is voltage sag rather than a cl
 cutoff. Watch cell voltage, not pack percentage — the Telemetry page shows pack
 voltage divided by six cells for this reason.
 
-**ESC telemetry** for the DShot ESCs (North/West, S3–S6) goes to RX3 and RX4. Each
-4-in-1 T wire is one-way into RX; TX3 and TX4 are unused. Do not splice two T
+**ESC telemetry** for the DShot ESCs (North/West, S3–S6) goes to RX4 and RX6. Each
+4-in-1 T wire is one-way into RX; TX4 and TX6 are unused. Do not splice two T
 outputs onto one pad if both stacks can reply at once — one bus per UART.
 
 On this board `SERIAL_ORDER` is:
@@ -258,12 +258,17 @@ OTG1  UART7  USART1  USART2  USART3  UART8  UART4  USART6  OTG2
 
 | Pad | MCU UART | `SERIALn` | Parameter |
 |---|---|---|---|
-| RX3 | USART3 (`PD9`) | SERIAL4 | `SERIAL4_PROTOCOL` = 16 |
 | RX4 | UART4 (`PB8`) | SERIAL6 | `SERIAL6_PROTOCOL` = 16 |
+| RX6 | USART6 (`PC7`) | SERIAL7 | `SERIAL7_PROTOCOL` = 16 |
 
-The config records this as `link.esc_telemetry_serials: [4, 6]`. Connect and apply
+RX6 is TIM3 RCIN by default. `SERIAL7_PROTOCOL` = 16 selects the UART alternate
+on that pad. After that, the receiver cannot live on RX6.
+
+The config records this as `link.esc_telemetry_serials: [6, 7]`. Connect and apply
 mapping writes both protocols. They take effect at boot, so reboot after the first
-apply. East/South CAN ESCs report over DroneCAN, not these pins.
+apply. East/South sit behind the CAN-to-PWM node: DroneCAN carries their RPM, but
+voltage, current and temperature only appear if that 4-in-1's T-wire goes into the
+**node's** ESC-telemetry UART, not RX4/RX6.
 
 ## Servo signal characteristics
 

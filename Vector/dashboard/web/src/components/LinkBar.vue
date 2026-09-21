@@ -2,14 +2,15 @@
   Top bar: link state, armed state, and the two controls that must always be one
   click away no matter which page is open.
 
-  "Stop" cuts motor tests and drops the levelling loop; "Center" returns every live
+  "Stop" cuts motor tests, drops the levelling loop, and stops a circling sweep; "Center" returns every live
   gimbal to neutral. On a bench with propellers fitted, hunting through pages for
   those is not acceptable, so they live here.
 -->
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { age, num, pct } from '../lib/format'
+import { isMotorKillKey, isTypingTarget } from '../lib/keys'
 import store, { isPending, linkUp, send } from '../lib/store'
 import StatusPill from './StatusPill.vue'
 
@@ -62,10 +63,28 @@ function connect() {
 
 /** One button that quiets everything the dashboard could be driving. */
 function stopAll() {
+  send('oscillate', { active: false })
   send('level', { active: false })
   send('stop_motors')
   send('live_end')
 }
+
+function killMotors() {
+  send('stop_motors')
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (!isMotorKillKey(event)) return
+  // A kill switch has to work even while a field is focused. Do not steal the
+  // character from the field; just cut the motors.
+  if (!isTypingTarget(event.target)) {
+    event.preventDefault()
+  }
+  killMotors()
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown, true))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown, true))
 </script>
 
 <template>
@@ -77,6 +96,7 @@ function stopAll() {
       <StatusPill v-else-if="linkUp" tone="ok">disarmed</StatusPill>
 
       <StatusPill v-if="controller?.active" tone="accent" pulse>levelling</StatusPill>
+      <StatusPill v-if="store.state?.outputs.oscillateActive" tone="accent" pulse>circling</StatusPill>
 
       <span v-if="vehicle?.mode && linkUp" class="mode mono">{{ vehicle.mode }}</span>
     </div>
@@ -113,9 +133,16 @@ function stopAll() {
         <button class="ghost" title="Return every live gimbal to neutral" @click="send('center')">
           Center
         </button>
-        <button class="danger" title="Stop motor tests and drop the levelling loop" @click="stopAll">
+        <button
+          class="danger"
+          title="Stop motor tests, circling, and the levelling loop. X stops motors immediately from any page."
+          @click="stopAll"
+        >
           Stop
         </button>
+        <span class="hint faint" title="Press X on any page to zero every motor test immediately">
+          <kbd>X</kbd> motors
+        </span>
         <button class="ghost" @click="send('disconnect')">Disconnect</button>
       </template>
     </div>
@@ -156,8 +183,36 @@ function stopAll() {
   padding: 5px var(--s2);
 }
 
+.hint {
+  font-size: var(--fs-xs);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+
+.hint kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.4em;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 @media (max-width: 1000px) {
   .stats {
+    display: none;
+  }
+}
+
+@media (max-width: 820px) {
+  .hint {
     display: none;
   }
 }

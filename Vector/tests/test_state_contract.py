@@ -31,6 +31,7 @@ from server import config as vconfig  # noqa: E402
 from server import state as vstate  # noqa: E402
 from server.bench import Bench  # noqa: E402
 from server.controller import LevelController  # noqa: E402
+from server.link import ESC_TELEMETRY_BASE, MavlinkLink, STREAM_INTERVALS_US, Telemetry  # noqa: E402
 
 TYPES_TS = os.path.join(
     REPO_ROOT, "Vector", "dashboard", "web", "src", "lib", "types.ts"
@@ -87,6 +88,7 @@ class StateShapeTest(unittest.TestCase):
                 "rollRateDegS", "pitchRateDegS", "yawRateDegS", "rateMagnitudeDegS",
                 "voltage", "current", "batteryRemaining", "loadPercent",
                 "gpsFix", "gpsSats", "throttle", "ageS",
+                "accelXg", "accelYg", "accelZg", "accelAgeS",
             },
         )
 
@@ -130,7 +132,9 @@ class StateShapeTest(unittest.TestCase):
             set(self.snap["controller"]),
             {
                 "active", "mode", "levelGain", "leadTimeS", "maxTiltFraction",
-                "invertRoll", "invertPitch", "tiltCapDeg", "target", "preview",
+                "invertRoll", "invertPitch", "accelGainDegG", "accelDeadbandG",
+                "invertAccelX", "invertAccelY", "tiltCapDeg", "target", "preview",
+                "accelPreview", "linearAccelG",
                 "saturated", "loopHz", "updates", "lastError",
             },
         )
@@ -139,10 +143,18 @@ class StateShapeTest(unittest.TestCase):
             set(self.snap["controller"]["preview"]),
             {"forward", "right", "magnitude", "saturated"},
         )
+        self.assertEqual(
+            set(self.snap["controller"]["accelPreview"]),
+            {"forward", "right", "magnitude", "saturated"},
+        )
+        self.assertEqual(
+            set(self.snap["controller"]["linearAccelG"]),
+            {"x", "y", "z", "horizontal"},
+        )
 
     def test_outputs_keys(self) -> None:
         self.assertEqual(
-            set(self.snap["outputs"]), {"owner", "rampActive", "motorTestActive"}
+            set(self.snap["outputs"]), {"owner", "rampActive", "motorTestActive", "oscillateActive"}
         )
 
     def test_events_is_a_time_ordered_list(self) -> None:
@@ -169,10 +181,97 @@ class StateShapeTest(unittest.TestCase):
         """An empty list, not placeholder rows: the UI says "nothing reporting"."""
         self.assertEqual(self.snap["escs"], [])
 
+    def test_current_alone_is_enough_to_list_an_esc(self) -> None:
+        cfg = vconfig.load()
+        bench = Bench(cfg, link=FakeLink())
+        try:
+            telem = bench.link.telemetry()
+            telem.esc_current[14] = 2.5
+            rows = vstate.esc_payload(bench, telem)
+        finally:
+            bench.outputs.stop()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["index"], 14)
+        self.assertEqual(rows[0]["current"], 2.5)
+
     def test_snapshot_is_json_serialisable(self) -> None:
         import json
 
         json.dumps(self.snap)
+
+
+class EscTelemetryParseTest(unittest.TestCase):
+    """CAN ESCs publish groups 13–20; dropping those IDs made the page look empty."""
+
+    def _msg(self, kind: str, **fields):
+        class Msg:
+            def get_type(self_inner):
+                return kind
+
+        msg = Msg()
+        for name, value in fields.items():
+            setattr(msg, name, value)
+        return msg
+
+    def test_every_esc_group_is_requested_and_handled(self) -> None:
+        self.assertIn("ESC_TELEMETRY_13_TO_16", STREAM_INTERVALS_US)
+        self.assertIn("ESC_TELEMETRY_17_TO_20", STREAM_INTERVALS_US)
+        self.assertEqual(set(ESC_TELEMETRY_BASE), set(MavlinkLink._HANDLERS) & set(ESC_TELEMETRY_BASE))
+
+    def test_high_group_is_parsed(self) -> None:
+        snap = Telemetry()
+        MavlinkLink._on_esc_telemetry(
+            None,
+            snap,
+            self._msg(
+                "ESC_TELEMETRY_13_TO_16",
+                voltage=[2210, 0, 0, 0],
+                current=[150, 0, 0, 0],
+                rpm=[1200, 0, 0, 0],
+                temperature=[42, 0, 0, 0],
+                count=[4, 0, 0, 0],
+            ),
+        )
+        self.assertAlmostEqual(snap.esc_voltage[13], 22.1)
+        self.assertEqual(snap.esc_rpm[13], 1200.0)
+        self.assertAlmostEqual(snap.esc_current[13], 1.5)
+        self.assertEqual(snap.esc_temp[13], 42.0)
+
+    def test_zero_analog_fields_are_not_invented(self) -> None:
+        """A CAN slot can publish RPM (or just a packet count) with volts/temp at 0."""
+        snap = Telemetry()
+        MavlinkLink._on_esc_telemetry(
+            None,
+            snap,
+            self._msg(
+                "ESC_TELEMETRY_17_TO_20",
+                voltage=[0, 0, 0, 0],
+                current=[0, 0, 0, 0],
+                rpm=[0, 330, 0, 0],
+                temperature=[0, 0, 0, 0],
+                count=[0, 3, 0, 0],
+            ),
+        )
+        self.assertEqual(snap.esc_rpm[18], 330.0)
+        self.assertNotIn(18, snap.esc_voltage)
+        self.assertNotIn(18, snap.esc_temp)
+        self.assertNotIn(18, snap.esc_current)
+
+    def test_empty_slot_is_ignored(self) -> None:
+        snap = Telemetry()
+        MavlinkLink._on_esc_telemetry(
+            None,
+            snap,
+            self._msg(
+                "ESC_TELEMETRY_1_TO_4",
+                voltage=[0, 0, 0, 0],
+                current=[0, 0, 0, 0],
+                rpm=[0, 0, 0, 0],
+                temperature=[0, 0, 0, 0],
+                count=[0, 0, 0, 0],
+            ),
+        )
+        self.assertEqual(snap.esc_voltage, {})
 
 
 class TypeScriptParityTest(unittest.TestCase):

@@ -7,13 +7,17 @@
 
 // motor test definitions
 #define MOTOR_TEST_TIMEOUT_SEC          600     // max timeout is 10 minutes (600 seconds)
+#define MOTOR_TEST_RAMP_MS              2000    // spool every masked motor together from stopped to the commanded throttle
 
 static uint32_t motor_test_start_ms;        // system time the motor test began
 static uint32_t motor_test_timeout_ms;      // test will timeout this many milliseconds after the motor_test_start_ms
+static uint32_t motor_test_ramp_start_ms;   // when the current set actually began writing, so the ramp does not skip the interlock wait
+static uint32_t motor_test_ramp_ms;         // spool time for this test; at most half the timeout so the command is held
 static uint8_t motor_test_seq;              // motor sequence number of motor being tested
 static uint8_t motor_test_count;            // number of motors to test
 static uint8_t motor_test_throttle_type;    // motor throttle type (0=throttle percentage, 1=PWM, 2=pilot throttle channel pass-through)
 static float motor_test_throttle_value;  // throttle to be sent to motor, value depends upon it's type
+static uint32_t motor_test_mask;            // bit (seq-1) for every motor held in this test
 
 // motor_test_output - checks for timeout and sends updates to motors objects
 void Copter::motor_test_output()
@@ -37,6 +41,14 @@ void Copter::motor_test_output()
                 motor_test_seq++;
                 motor_test_count--;
                 motor_test_start_ms = now;
+                motor_test_ramp_start_ms = now;
+                motor_test_ramp_ms = MOTOR_TEST_RAMP_MS;
+                if (motor_test_timeout_ms < motor_test_ramp_ms * 2U) {
+                    motor_test_ramp_ms = motor_test_timeout_ms / 2U;
+                }
+                if (motor_test_seq >= 1 && motor_test_seq <= 32) {
+                    motor_test_mask = (1U << (motor_test_seq - 1));
+                }
                 if (!motors->armed()) {
                     motors->armed(true);
                     hal.util->set_soft_armed(true);
@@ -87,10 +99,33 @@ void Copter::motor_test_output()
             return;
         }
 
-        // turn on motor to specified pwm value
-        if (!motors->output_test_seq(motor_test_seq, pwm)) {
-            gcs().send_text(MAV_SEVERITY_INFO, "Motor Test: cancelled");
-            motor_test_stop();
+        // Interlock is not ready on the first cycle after a start. Do not
+        // cancel the test -- output_test_seq would zero every motor.
+        if (!motors->armed() || !motors->get_interlock()) {
+            motors->output_min();
+            motor_test_ramp_start_ms = now;
+            return;
+        }
+
+        // One PWM for every masked motor, climbed from min to the command so a
+        // 1% bench test does not slam the ESCs from stopped. The ramp is at most
+        // half the test so a 2 s command still spends a second at the target.
+        if (motor_test_ramp_ms > 0) {
+            const uint32_t elapsed_ms = now - motor_test_ramp_start_ms;
+            const float frac = constrain_float(elapsed_ms / (float)motor_test_ramp_ms, 0.0f, 1.0f);
+            const int16_t pwm_min = motors->get_pwm_output_min();
+            pwm = pwm_min + (int16_t)((pwm - pwm_min) * frac);
+        }
+
+        // Every bit is written in this call so a burst of DO_MOTOR_TEST
+        // commands comes up on one output cycle instead of one motor at a time.
+        for (uint8_t seq = 1; seq <= 32; seq++) {
+            if ((motor_test_mask & (1U << (seq - 1))) == 0) {
+                continue;
+            }
+            if (!motors->output_test_seq(seq, pwm)) {
+                return;
+            }
         }
     }
 }
@@ -131,7 +166,7 @@ bool Copter::mavlink_motor_control_check(const GCS_MAVLINK &gcs_chan, bool check
 // mavlink_motor_test_start - start motor test - spin a single motor at a specified pwm
 //  returns MAV_RESULT_ACCEPTED on success, MAV_RESULT_FAILED on failure
 MAV_RESULT Copter::mavlink_motor_test_start(const GCS_MAVLINK &gcs_chan, uint8_t motor_seq, uint8_t throttle_type, float throttle_value,
-                                         float timeout_sec, uint8_t motor_count)
+                                         float timeout_sec, uint8_t motor_count, uint32_t seq_mask)
 {
     if (motor_count == 0) {
         motor_count = 1;
@@ -165,18 +200,38 @@ MAV_RESULT Copter::mavlink_motor_test_start(const GCS_MAVLINK &gcs_chan, uint8_t
             // turn on notify leds
             AP_Notify::flags.esc_calibration = true;
             ap.motor_test = true;
+            motor_test_mask = 0;
+            motor_test_ramp_start_ms = AP_HAL::millis();
         }
     }
 
     // set timeout
     motor_test_start_ms = AP_HAL::millis();
     motor_test_timeout_ms = MIN(timeout_sec, MOTOR_TEST_TIMEOUT_SEC) * 1000;
+    if (motor_test_ramp_ms == 0) {
+        motor_test_ramp_ms = MOTOR_TEST_RAMP_MS;
+        if (motor_test_timeout_ms < motor_test_ramp_ms * 2U) {
+            motor_test_ramp_ms = motor_test_timeout_ms / 2U;
+        }
+    }
 
     // store required output
     motor_test_seq = motor_seq;
     motor_test_count = motor_count;
     motor_test_throttle_type = throttle_type;
     motor_test_throttle_value = throttle_value;
+    if (seq_mask != 0) {
+        // One command names every motor that must come up together. A burst of
+        // per-motor COMMAND_LONGs was dropping sequences on USB.
+        motor_test_mask = seq_mask;
+    } else if (motor_seq >= 1 && motor_seq <= 32) {
+        if (motor_count > 1) {
+            // Mission Planner "test N motors in sequence" still walks one at a time
+            motor_test_mask = (1U << (motor_seq - 1));
+        } else {
+            motor_test_mask |= (1U << (motor_seq - 1));
+        }
+    }
 
     if (motor_test_throttle_type == MOTOR_TEST_COMPASS_CAL) {
         compass.per_motor_calibration_start();
@@ -203,6 +258,9 @@ void Copter::motor_test_stop()
     // reset timeout
     motor_test_start_ms = 0;
     motor_test_timeout_ms = 0;
+    motor_test_ramp_start_ms = 0;
+    motor_test_ramp_ms = 0;
+    motor_test_mask = 0;
 
     // re-enable failsafes
     g.failsafe_throttle.load();

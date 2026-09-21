@@ -85,7 +85,10 @@ def arm_payload(bench: Bench, telemetry: Any) -> List[Dict[str, Any]]:
 def esc_payload(bench: Bench, telemetry: Any) -> List[Dict[str, Any]]:
     """Every ESC that is actually reporting, labelled with the motor it belongs to."""
     indices = sorted(
-        set(telemetry.esc_voltage) | set(telemetry.esc_rpm) | set(telemetry.esc_temp)
+        set(telemetry.esc_voltage)
+        | set(telemetry.esc_rpm)
+        | set(telemetry.esc_temp)
+        | set(telemetry.esc_current)
     )
     out: List[Dict[str, Any]] = []
     for index in indices:
@@ -109,6 +112,24 @@ def controller_payload(controller: LevelController, telemetry: Any) -> Dict[str,
     preview_forward, preview_right, preview_saturated = controller.desired_lean(
         telemetry.roll_deg, telemetry.pitch_deg, telemetry.roll_rate_dps, telemetry.pitch_rate_dps
     )
+    imu_seen = telemetry.accel_at > 0.0
+    if imu_seen:
+        lin_x, lin_y, lin_z = kin.linear_accel_g(
+            (telemetry.accel_x_g, telemetry.accel_y_g, telemetry.accel_z_g),
+            telemetry.roll_deg,
+            telemetry.pitch_deg,
+        )
+        accel_forward, accel_right, accel_saturated = controller.desired_accel_lean(
+            telemetry.accel_x_g,
+            telemetry.accel_y_g,
+            telemetry.accel_z_g,
+            telemetry.roll_deg,
+            telemetry.pitch_deg,
+        )
+    else:
+        lin_x = lin_y = lin_z = 0.0
+        accel_forward = accel_right = 0.0
+        accel_saturated = False
     return {
         "active": status.active,
         "mode": status.mode,
@@ -117,6 +138,10 @@ def controller_payload(controller: LevelController, telemetry: Any) -> Dict[str,
         "maxTiltFraction": status.max_tilt_fraction,
         "invertRoll": status.invert_roll,
         "invertPitch": status.invert_pitch,
+        "accelGainDegG": status.accel_gain_deg_g,
+        "accelDeadbandG": status.accel_deadband_g,
+        "invertAccelX": status.invert_accel_x,
+        "invertAccelY": status.invert_accel_y,
         "tiltCapDeg": status.tilt_cap_deg,
         "target": {
             "forward": status.target_forward_deg,
@@ -128,6 +153,18 @@ def controller_payload(controller: LevelController, telemetry: Any) -> Dict[str,
             "right": _round(preview_right),
             "magnitude": _round((preview_forward ** 2 + preview_right ** 2) ** 0.5),
             "saturated": preview_saturated,
+        },
+        "accelPreview": {
+            "forward": _round(accel_forward),
+            "right": _round(accel_right),
+            "magnitude": _round((accel_forward ** 2 + accel_right ** 2) ** 0.5),
+            "saturated": accel_saturated,
+        },
+        "linearAccelG": {
+            "x": _round(lin_x, 3),
+            "y": _round(lin_y, 3),
+            "z": _round(lin_z, 3),
+            "horizontal": _round((lin_x ** 2 + lin_y ** 2) ** 0.5, 3),
         },
         "saturated": status.saturated,
         "loopHz": status.loop_hz,
@@ -175,6 +212,12 @@ def snapshot(bench: Bench, controller: LevelController) -> Dict[str, Any]:
             "pitchRateDegS": _round(telemetry.pitch_rate_dps, 1),
             "yawRateDegS": _round(telemetry.yaw_rate_dps, 1),
             "rateMagnitudeDegS": _round(telemetry.rate_magnitude_dps, 1),
+            "accelXg": _round(telemetry.accel_x_g, 3),
+            "accelYg": _round(telemetry.accel_y_g, 3),
+            "accelZg": _round(telemetry.accel_z_g, 3),
+            "accelAgeS": (
+                None if telemetry.accel_at <= 0.0 else _round(now - telemetry.accel_at, 3)
+            ),
             "voltage": _round(telemetry.voltage_v),
             "current": _round(telemetry.current_a),
             "batteryRemaining": telemetry.battery_remaining,
@@ -193,6 +236,7 @@ def snapshot(bench: Bench, controller: LevelController) -> Dict[str, Any]:
             "owner": bench.outputs.owner,
             "rampActive": bench.outputs.ramp_active(),
             "motorTestActive": bench.motor_test_active,
+            "oscillateActive": bench.oscillate_active,
         },
         # A flat, time-ordered list. The browser merges it with the commands it sent
         # itself, which only works if both sides carry real timestamps.

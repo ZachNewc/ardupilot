@@ -9,6 +9,10 @@ Tilt the rig by hand and the gimbals counter-rotate so the motors keep pointing 
 world vertical. That is the defining behaviour of a thrust-vectoring airframe and it
 is worth being able to see and tune on a bench with the propellers off.
 
+The same loop can instead read the IMU and lean motor thrust against measured linear
+acceleration, so a shove is opposed by the translation channel rather than by
+trying to square the airframe.
+
 WHAT THIS IS NOT
 
 This is not flight stabilisation, and it cannot become flight stabilisation, for two
@@ -25,8 +29,9 @@ The second is latency. This loop runs in Python, over MAVLink, over a serial lin
 at tens of hertz. Attitude control needs hundreds of hertz with a deterministic
 budget. ``docs/04-control.md`` covers where the real controller belongs.
 
-So: a demonstrator and a tuning aid for the levelling law and the servo signs. Nothing
-in this module should ever be relied on to keep an aircraft in the air.
+So: a demonstrator and a tuning aid for the levelling law, the accel-hold law, and
+the servo signs. Nothing in this module should ever be relied on to keep an aircraft
+in the air.
 """
 
 from __future__ import annotations
@@ -35,18 +40,24 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from . import kinematics as kin
 from .bench import OWNER_STABILIZE, Bench
 
 MODE_OFF = "off"
 MODE_LEVEL = "level"
-MODES = (MODE_OFF, MODE_LEVEL)
+MODE_ACCEL = "accel"
+MODES = (MODE_OFF, MODE_LEVEL, MODE_ACCEL)
 
 # Rolling window used to report the loop rate actually achieved, so the gap between
 # this and a real flight controller stays visible rather than implied.
 RATE_WINDOW = 40
+
+# First-order filter on linear accel so IMU noise does not chatter the servos.
+ACCEL_FILTER_S = 0.08
+DEFAULT_ACCEL_GAIN_DEG_G = 40.0
+DEFAULT_ACCEL_DEADBAND_G = 0.05
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,10 @@ class ControllerStatus:
     max_tilt_fraction: float
     invert_roll: bool
     invert_pitch: bool
+    accel_gain_deg_g: float
+    accel_deadband_g: float
+    invert_accel_x: bool
+    invert_accel_y: bool
     tilt_cap_deg: float
     target_forward_deg: float
     target_right_deg: float
@@ -85,6 +100,11 @@ class LevelController:
         self._max_tilt_fraction = settings.max_tilt_fraction
         self._invert_roll = settings.invert_roll
         self._invert_pitch = settings.invert_pitch
+        self._accel_gain_deg_g = DEFAULT_ACCEL_GAIN_DEG_G
+        self._accel_deadband_g = DEFAULT_ACCEL_DEADBAND_G
+        self._invert_accel_x = False
+        self._invert_accel_y = False
+        self._filt_lin = (0.0, 0.0)
 
         self._target = (0.0, 0.0)
         self._saturated = False
@@ -127,6 +147,10 @@ class LevelController:
             max_tilt_fraction=self._max_tilt_fraction,
             invert_roll=self._invert_roll,
             invert_pitch=self._invert_pitch,
+            accel_gain_deg_g=self._accel_gain_deg_g,
+            accel_deadband_g=self._accel_deadband_g,
+            invert_accel_x=self._invert_accel_x,
+            invert_accel_y=self._invert_accel_y,
             tilt_cap_deg=round(self.tilt_cap_deg(), 2),
             target_forward_deg=round(target[0], 2),
             target_right_deg=round(target[1], 2),
@@ -147,6 +171,10 @@ class LevelController:
         max_tilt_fraction: Optional[float] = None,
         invert_roll: Optional[bool] = None,
         invert_pitch: Optional[bool] = None,
+        accel_gain_deg_g: Optional[float] = None,
+        accel_deadband_g: Optional[float] = None,
+        invert_accel_x: Optional[bool] = None,
+        invert_accel_y: Optional[bool] = None,
     ) -> None:
         if level_gain is not None:
             self._level_gain = max(0.0, min(1.5, float(level_gain)))
@@ -158,6 +186,14 @@ class LevelController:
             self._invert_roll = bool(invert_roll)
         if invert_pitch is not None:
             self._invert_pitch = bool(invert_pitch)
+        if accel_gain_deg_g is not None:
+            self._accel_gain_deg_g = max(0.0, min(90.0, float(accel_gain_deg_g)))
+        if accel_deadband_g is not None:
+            self._accel_deadband_g = max(0.0, min(0.5, float(accel_deadband_g)))
+        if invert_accel_x is not None:
+            self._invert_accel_x = bool(invert_accel_x)
+        if invert_accel_y is not None:
+            self._invert_accel_y = bool(invert_accel_y)
 
     # ------------------------------------------------------------------
     # control law
@@ -195,6 +231,33 @@ class LevelController:
             return forward * scale, right * scale, True
         return forward, right, False
 
+    def desired_accel_lean(
+        self,
+        accel_x_g: float,
+        accel_y_g: float,
+        accel_z_g: float,
+        roll_deg: float,
+        pitch_deg: float,
+    ) -> Tuple[float, float, bool]:
+        """
+        Point motor thrust against measured linear acceleration.
+
+        Gravity is removed using attitude, so holding the frame at an angle does
+        not count as a shove. Returns (forward_deg, right_deg, saturated).
+        """
+        lin_x, lin_y, _lin_z = kin.linear_accel_g(
+            (accel_x_g, accel_y_g, accel_z_g), roll_deg, pitch_deg
+        )
+        return kin.oppose_horizontal_accel(
+            lin_x,
+            lin_y,
+            self._accel_gain_deg_g,
+            self._accel_deadband_g,
+            self._invert_accel_x,
+            self._invert_accel_y,
+            self.tilt_cap_deg(),
+        )
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
@@ -210,9 +273,7 @@ class LevelController:
 
         self._mode = mode
         if self.active:
-            return self._bench.link.note(
-                f"Levelling retuned: gain {self._level_gain:.2f}, lead {self._lead_time_s * 1000:.0f} ms"
-            )
+            return self._bench.link.note(self._running_note("retuned"))
 
         leftover = self._thread
         if leftover is not None and leftover.is_alive():
@@ -222,12 +283,21 @@ class LevelController:
             self._intervals.clear()
             self._updates = 0
             self._last_error = ""
+            self._filt_lin = (0.0, 0.0)
         self._stop.clear()
         self._generation = self._bench.outputs.acquire(OWNER_STABILIZE)
         self._thread = threading.Thread(target=self._run, name="vector-level", daemon=True)
         self._thread.start()
-        return self._bench.link.note(
-            f"Levelling on: holding thrust vertical at gain {self._level_gain:.2f}, "
+        return self._bench.link.note(self._running_note("on"))
+
+    def _running_note(self, verb: str) -> str:
+        if self._mode == MODE_ACCEL:
+            return (
+                f"Accel hold {verb}: opposing linear accel at "
+                f"{self._accel_gain_deg_g:.0f} deg/g, capped at {self.tilt_cap_deg():.1f} deg"
+            )
+        return (
+            f"Levelling {verb}: holding thrust vertical at gain {self._level_gain:.2f}, "
             f"capped at {self.tilt_cap_deg():.1f} deg"
         )
 
@@ -238,12 +308,45 @@ class LevelController:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1.5)
         self._thread = None
+        stopped = self._mode
         self._mode = MODE_OFF
         with self._lock:
             self._target = (0.0, 0.0)
             self._saturated = False
+            self._filt_lin = (0.0, 0.0)
         self._bench.outputs.release(OWNER_STABILIZE)
-        return self._bench.link.note("Levelling off") if was_active else "Levelling already off"
+        if not was_active:
+            return "Levelling already off"
+        label = "Accel hold off" if stopped == MODE_ACCEL else "Levelling off"
+        return self._bench.link.note(label)
+
+    def _accel_command(self, telemetry: Any, period: float) -> Tuple[float, float, bool]:
+        """Filter linear accel, then oppose the horizontal part with gimbal lean."""
+        if getattr(telemetry, "accel_at", 0.0) <= 0.0:
+            with self._lock:
+                self._filt_lin = (0.0, 0.0)
+            return 0.0, 0.0, False
+
+        lin_x, lin_y, _lin_z = kin.linear_accel_g(
+            (telemetry.accel_x_g, telemetry.accel_y_g, telemetry.accel_z_g),
+            telemetry.roll_deg,
+            telemetry.pitch_deg,
+        )
+        alpha = period / (ACCEL_FILTER_S + period)
+        filt_x, filt_y = self._filt_lin
+        filt_x += alpha * (lin_x - filt_x)
+        filt_y += alpha * (lin_y - filt_y)
+        with self._lock:
+            self._filt_lin = (filt_x, filt_y)
+        return kin.oppose_horizontal_accel(
+            filt_x,
+            filt_y,
+            self._accel_gain_deg_g,
+            self._accel_deadband_g,
+            self._invert_accel_x,
+            self._invert_accel_y,
+            self.tilt_cap_deg(),
+        )
 
     def _run(self) -> None:
         period = 1.0 / max(1.0, self._bench.config.bench_limits.command_rate_hz)
@@ -255,9 +358,15 @@ class LevelController:
                 break
 
             telemetry = self._bench.link.telemetry()
-            forward, right, saturated = self.desired_lean(
-                telemetry.roll_deg, telemetry.pitch_deg, telemetry.roll_rate_dps, telemetry.pitch_rate_dps
-            )
+            if self._mode == MODE_ACCEL:
+                forward, right, saturated = self._accel_command(telemetry, period)
+            else:
+                forward, right, saturated = self.desired_lean(
+                    telemetry.roll_deg,
+                    telemetry.pitch_deg,
+                    telemetry.roll_rate_dps,
+                    telemetry.pitch_rate_dps,
+                )
 
             targets = {}
             for arm in self._bench.config.live_arms():

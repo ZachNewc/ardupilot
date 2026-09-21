@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import sys
 import threading
@@ -31,8 +32,8 @@ from server.config import channel_assigned  # noqa: E402
 from server import board  # noqa: E402
 from server import frames  # noqa: E402
 from server import kinematics as kin  # noqa: E402
-from server.bench import MOTOR_STOP_US, Bench  # noqa: E402
-from server.controller import LevelController  # noqa: E402
+from server.bench import MOTOR_STOP_US, MOTOR_TEST_RAMP_S, Bench, motor_test_ramp_steps  # noqa: E402
+from server.controller import MODE_ACCEL, LevelController  # noqa: E402
 from server.outputs import OutputArbiter, link_budget  # noqa: E402
 
 
@@ -172,6 +173,99 @@ class LevellingLawTest(unittest.TestCase):
         )
 
 
+class AccelLawTest(unittest.TestCase):
+    """
+    Gravity-compensated oppose-by-lean. Signs matter the same way they do for
+    levelling: a forward shove must lean the motors aft, or the demo amplifies
+    the disturbance instead of cancelling it.
+    """
+
+    def setUp(self) -> None:
+        self.bench = make_bench()
+        self.controller = LevelController(self.bench)
+        self.controller.configure(accel_gain_deg_g=40.0, accel_deadband_g=0.0)
+
+    def tearDown(self) -> None:
+        self.controller.stop()
+        self.bench.outputs.stop()
+
+    def lean(self, accel, roll=0.0, pitch=0.0):
+        ax, ay, az = accel
+        return self.controller.desired_accel_lean(ax, ay, az, roll, pitch)
+
+    def test_rest_at_level_needs_no_lean(self) -> None:
+        """A parked IMU reads +1 g down, not zero. That must not look like a shove."""
+        forward, right, saturated = self.lean((0.0, 0.0, 1.0))
+        self.assertAlmostEqual(forward, 0.0, delta=1e-9)
+        self.assertAlmostEqual(right, 0.0, delta=1e-9)
+        self.assertFalse(saturated)
+
+    def test_static_tilt_is_not_a_shove(self) -> None:
+        """Gravity in body frame at a pitched rest equals the IMU, so linear accel is 0."""
+        pitch = 10.0
+        gravity = kin.gravity_down_in_body(0.0, pitch)
+        forward, right, _ = self.lean(gravity, roll=0.0, pitch=pitch)
+        self.assertAlmostEqual(forward, 0.0, delta=1e-6)
+        self.assertAlmostEqual(right, 0.0, delta=1e-6)
+
+    def test_forward_shove_leans_motors_aft(self) -> None:
+        """Positive body-X accel is a forward shove; the rotors must point aft to oppose it."""
+        forward, right, _ = self.lean((0.2, 0.0, 1.0))
+        self.assertAlmostEqual(forward, -8.0, delta=1e-6)
+        self.assertAlmostEqual(right, 0.0, delta=1e-9)
+
+    def test_right_shove_leans_motors_left(self) -> None:
+        forward, right, _ = self.lean((0.0, 0.2, 1.0))
+        self.assertAlmostEqual(right, -8.0, delta=1e-6)
+        self.assertAlmostEqual(forward, 0.0, delta=1e-9)
+
+    def test_deadband_swallows_imu_noise(self) -> None:
+        self.controller.configure(accel_deadband_g=0.05)
+        forward, right, _ = self.lean((0.02, 0.02, 1.0))
+        self.assertAlmostEqual(forward, 0.0, delta=1e-9)
+        self.assertAlmostEqual(right, 0.0, delta=1e-9)
+
+    def test_deadband_shrinks_rather_than_jumping(self) -> None:
+        """Just outside the band must not leap to the full un-banded command."""
+        self.controller.configure(accel_deadband_g=0.05)
+        forward, _, _ = self.lean((0.10, 0.0, 1.0))
+        self.assertAlmostEqual(forward, -2.0, delta=1e-6)
+
+    def test_gain_scales_the_lean(self) -> None:
+        self.controller.configure(accel_gain_deg_g=20.0)
+        half, _, _ = self.lean((0.2, 0.0, 1.0))
+        self.controller.configure(accel_gain_deg_g=40.0)
+        full, _, _ = self.lean((0.2, 0.0, 1.0))
+        self.assertAlmostEqual(half, -4.0, delta=1e-6)
+        self.assertAlmostEqual(full, -8.0, delta=1e-6)
+
+    def test_inversion_flips_the_correction(self) -> None:
+        base, _, _ = self.lean((0.2, 0.0, 1.0))
+        self.controller.configure(invert_accel_x=True)
+        flipped, _, _ = self.lean((0.2, 0.0, 1.0))
+        self.assertAlmostEqual(flipped, -base, delta=1e-6)
+
+    def test_large_shove_is_capped(self) -> None:
+        forward, right, saturated = self.lean((2.0, 0.0, 1.0))
+        self.assertTrue(saturated)
+        self.assertAlmostEqual(abs(forward), self.controller.tilt_cap_deg(), delta=1e-6)
+        self.assertLess(forward, 0.0)
+        self.assertAlmostEqual(right, 0.0, delta=1e-9)
+
+    def test_missing_imu_is_treated_as_rest_when_level(self) -> None:
+        """Zeros on a level frame have no horizontal component after gravity is removed."""
+        forward, right, _ = self.lean((0.0, 0.0, 0.0))
+        self.assertAlmostEqual(forward, 0.0, delta=1e-9)
+        self.assertAlmostEqual(right, 0.0, delta=1e-9)
+
+    def test_accel_mode_is_accepted(self) -> None:
+        note = self.controller.start(MODE_ACCEL)
+        self.assertIn("Accel hold", note)
+        self.assertEqual(self.controller.status().mode, MODE_ACCEL)
+        self.controller.stop()
+        self.assertEqual(self.controller.status().mode, "off")
+
+
 class BenchOperationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.bench = make_bench()
@@ -243,6 +337,52 @@ class BenchOperationTest(unittest.TestCase):
         self.assertAlmostEqual(lean[0], 10.0, delta=0.2)
         self.assertAlmostEqual(lean[1], 0.0, delta=0.2)
 
+    def test_oscillate_sweeps_every_live_arm_together(self) -> None:
+        """A body-frame circle: every live arm traces the same lean at the same time."""
+        note = self.bench.start_oscillate(None)
+        self.assertTrue(self.bench.oscillate_active)
+        self.assertIn("Circling", note)
+        north = self.bench.config.arm("north")
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            self.drain()
+            state = self.bench.arm_state(north)
+            if math.hypot(state.forward_deg, state.right_deg) > 4.0:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("circle never left centre")
+        north_state = self.bench.arm_state(north)
+        for arm in self.bench.config.live_arms():
+            other = self.bench.arm_state(arm)
+            self.assertAlmostEqual(other.forward_deg, north_state.forward_deg, delta=0.6, msg=arm.id)
+            self.assertAlmostEqual(other.right_deg, north_state.right_deg, delta=0.6, msg=arm.id)
+        self.bench.stop_oscillate()
+        self.assertFalse(self.bench.oscillate_active)
+
+    def test_oscillate_stays_inside_the_inscribed_circle(self) -> None:
+        radius = min(kin.uniform_tilt_limit(arm.gimbal) for arm in self.bench.config.live_arms())
+        self.bench.start_oscillate(["north"])
+        time.sleep(0.35)
+        north = self.bench.config.arm("north")
+        seen = []
+        deadline = time.time() + 0.4
+        while time.time() < deadline:
+            state = self.bench.arm_state(north)
+            seen.append(math.hypot(state.forward_deg, state.right_deg))
+            time.sleep(0.02)
+        self.bench.stop_oscillate()
+        self.assertTrue(seen)
+        self.assertLessEqual(max(seen), radius + 0.5)
+
+    def test_aim_preempts_oscillate(self) -> None:
+        self.bench.start_oscillate(None)
+        self.bench.aim(["north"], 0.0, 0.0)
+        deadline = time.time() + 1.0
+        while time.time() < deadline and self.bench.oscillate_active:
+            time.sleep(0.01)
+        self.assertFalse(self.bench.oscillate_active)
+
     def await_spin(self, timeout: float = 8.0) -> None:
         """Wait for the spin worker to finish stopping and releasing the outputs."""
         deadline = time.time() + timeout
@@ -258,12 +398,31 @@ class BenchOperationTest(unittest.TestCase):
             if channel_assigned(motor.channel) and motor.test_sequence is not None
         }
 
+    def spin_percent_groups(self):
+        """Each motor-test burst as (sequences, percent), stopping at the first zero."""
+        groups = []
+        seqs = set()
+        pct = None
+        for seq, percent, _ in self.bench.link.motor_tests:
+            if percent == 0.0:
+                break
+            if pct is None or percent != pct:
+                if seqs:
+                    groups.append((seqs, pct))
+                seqs = {seq}
+                pct = percent
+            else:
+                seqs.add(seq)
+        if seqs:
+            groups.append((seqs, pct))
+        return groups
+
     def test_one_spin_reaches_every_selected_motor(self) -> None:
         """
         One click starts every selected motor test before any of them is zeroed.
 
-        output_test_seq only updates the named slot, so the earlier wait-then-zero
-        between commands is what made the set run one at a time.
+        The firmware takes a sequence mask, so every selected slot is in that
+        one command rather than a per-motor burst that can drop a hole.
         """
         self.bench.spin_motors(None, ["top", "bottom"], 5.0, 0.2)
         self.await_spin()
@@ -271,20 +430,83 @@ class BenchOperationTest(unittest.TestCase):
         first_zero = next(i for i, test in enumerate(tests) if test[1] == 0.0)
         started = [seq for seq, percent, _ in tests[:first_zero] if percent > 0]
         self.assertEqual(set(started), self.live_test_sequences())
-        for sequence in self.live_test_sequences():
-            self.assertGreaterEqual(
-                started.count(sequence), 2,
-                f"sequence {sequence} was not latched twice",
-            )
         self.assertFalse({ch for ch, _ in self.bench.link.writes if board.is_can(ch)})
 
+    def test_spin_commands_leave_as_one_burst(self) -> None:
+        """
+        A 100 ms gap after the first motor is what tipped the airframe.
+
+        FakeLink is instant, so the whole burst must be on the wire well before
+        the old 0.4 s arm wait would have released the second command.
+        """
+        started = time.time()
+        self.bench.spin_motors(None, ["top", "bottom"], 5.0, 2.0)
+        deadline = time.time() + 1.0
+        want = len(self.live_test_sequences())
+        while time.time() < deadline:
+            sent = [test for test in self.bench.link.motor_tests if test[1] > 0]
+            if len(sent) >= want:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail(f"burst never completed; got {self.bench.link.motor_tests}")
+        self.assertLess(time.time() - started, 0.3)
+        self.bench._halt_spin()
+        self.await_spin()
+
     def test_spin_drives_every_motor_to_the_same_percent(self) -> None:
-        """Equal power means one motor-test percent, not one pulse per motor."""
+        """Equal power means one motor-test percent per step, not one pulse per motor."""
         self.bench.spin_motors(None, ["top", "bottom"], 5.0, 0.2)
         self.await_spin()
         percent = min(5.0, self.bench.config.bench_limits.motor_percent)
-        started = {pct for _, pct, _ in self.bench.link.motor_tests if pct > 0}
-        self.assertEqual(started, {percent})
+        groups = self.spin_percent_groups()
+        self.assertTrue(groups)
+        live = self.live_test_sequences()
+        for seqs, pct in groups:
+            self.assertEqual(seqs, live, pct)
+        self.assertAlmostEqual(groups[-1][1], percent)
+
+    def test_spin_ramps_every_motor_together(self) -> None:
+        """
+        Throttle climbs, and every selected rotor sees the same percent on each step.
+
+        Jumping to the target from stopped is what made a 1% bench test scream.
+        """
+        asked = 5.0
+        self.bench.spin_motors(None, ["top", "bottom"], asked, 2.0)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if len(self.spin_percent_groups()) >= 3:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail(f"ramp never started; got {self.bench.link.motor_tests}")
+        self.bench._halt_spin()
+        self.await_spin()
+        percent = min(asked, self.bench.config.bench_limits.motor_percent)
+        groups = self.spin_percent_groups()
+        self.assertGreaterEqual(len(groups), 3, groups)
+        percents = [pct for _, pct in groups]
+        self.assertEqual(percents, sorted(percents))
+        self.assertLess(percents[0], percent)
+        live = self.live_test_sequences()
+        for seqs, _ in groups:
+            self.assertEqual(seqs, live)
+
+    def test_motor_test_ramp_steps_land_on_the_target(self) -> None:
+        ramp_s, steps = motor_test_ramp_steps(15.0, 10.0)
+        self.assertAlmostEqual(ramp_s, MOTOR_TEST_RAMP_S)
+        self.assertGreater(len(steps), 3)
+        self.assertAlmostEqual(steps[-1], 15.0)
+        self.assertEqual(list(steps), sorted(steps))
+        self.assertGreater(steps[0], 0.0)
+        self.assertLess(steps[0], 15.0)
+
+    def test_a_short_spin_still_ramps_inside_its_duration(self) -> None:
+        ramp_s, steps = motor_test_ramp_steps(5.0, 0.2)
+        self.assertLessEqual(ramp_s, 0.2)
+        self.assertGreaterEqual(len(steps), 2)
+        self.assertAlmostEqual(steps[-1], 5.0)
 
     def test_spin_does_not_start_unselected_motors(self) -> None:
         other = self.bench.config.arm("east").motors["top"]
@@ -1046,16 +1268,60 @@ class OutputMapReportingTest(unittest.TestCase):
     def test_assert_output_mapping_opens_both_esc_telemetry_uarts(self) -> None:
         bench = self._bench(lambda raw: None)
         bench.assert_output_mapping()
-        self.assertEqual(16.0, bench.link.params["SERIAL4_PROTOCOL"])
-        self.assertEqual(16.0, bench.link.params["SERIAL6_PROTOCOL"])
+        serials = bench.config.link.esc_telemetry_serials
+        self.assertTrue(serials, "config should name the ESC telemetry UARTs")
+        for index in serials:
+            self.assertEqual(16.0, bench.link.params[f"SERIAL{index}_PROTOCOL"])
+
+    def test_assert_output_mapping_sets_dshot600_and_blheli_auto(self) -> None:
+        bench = self._bench(lambda raw: None)
+        bench.assert_output_mapping()
+        self.assertEqual(6.0, bench.link.params["MOT_PWM_TYPE"])
+        self.assertEqual(1.0, bench.link.params["SERVO_BLH_AUTO"])
+
+    def test_oneshot_pwm_type_demands_a_reboot(self) -> None:
+        bench = self._bench(lambda raw: None)
+        bench.link.params["MOT_PWM_TYPE"] = 1.0
+        bench.assert_output_mapping()
+        self.assertEqual(6.0, bench.link.params["MOT_PWM_TYPE"])
+        self.assertTrue(
+            any("MOT_PWM_TYPE" in error for error in bench.link.errors),
+            f"no MOT_PWM_TYPE reboot warning; got {bench.link.errors}",
+        )
+
+    def test_blheli_auto_off_demands_a_reboot(self) -> None:
+        bench = self._bench(lambda raw: None)
+        bench.link.params["SERVO_BLH_AUTO"] = 0.0
+        bench.assert_output_mapping()
+        self.assertEqual(1.0, bench.link.params["SERVO_BLH_AUTO"])
+        self.assertTrue(
+            any("SERVO_BLH_AUTO" in error for error in bench.link.errors),
+            f"no SERVO_BLH_AUTO reboot warning; got {bench.link.errors}",
+        )
 
     def test_wrong_esc_telem_protocol_demands_a_reboot(self) -> None:
         bench = self._bench(lambda raw: None)
-        bench.link.params["SERIAL4_PROTOCOL"] = 1.0
+        serials = bench.config.link.esc_telemetry_serials
+        if not serials:
+            self.skipTest("no ESC telemetry UART configured")
+        name = f"SERIAL{serials[0]}_PROTOCOL"
+        bench.link.params[name] = 1.0
         bench.assert_output_mapping()
         self.assertTrue(
-            any("SERIAL4_PROTOCOL" in error for error in bench.link.errors),
-            f"no SERIAL4 reboot warning; got {bench.link.errors}",
+            any(name in error for error in bench.link.errors),
+            f"no {name} reboot warning; got {bench.link.errors}",
+        )
+
+    def test_opening_rx6_for_esc_telem_warns_that_rcin_moves(self) -> None:
+        """RX6 is TIM3 RCIN until SERIAL7 is a UART protocol."""
+        bench = self._bench(lambda raw: None)
+        if board.RCIN_SERIAL not in bench.config.link.esc_telemetry_serials:
+            self.skipTest("RX6 is not an ESC telemetry UART in this config")
+        bench.link.params[f"SERIAL{board.RCIN_SERIAL}_PROTOCOL"] = 23.0
+        bench.assert_output_mapping()
+        self.assertTrue(
+            any("RC input" in error for error in bench.link.errors),
+            f"no RCIN warning; got {bench.link.errors}",
         )
 
     def test_a_clean_map_reports_nothing(self) -> None:

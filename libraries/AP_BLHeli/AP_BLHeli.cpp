@@ -1537,11 +1537,11 @@ void AP_BLHeli::init(uint32_t mask, AP_HAL::RCOutput::output_mode otype)
 /*
   read an ESC telemetry packet
  */
-void AP_BLHeli::read_telemetry_packet(AP_HAL::UARTDriver *uart)
+void AP_BLHeli::read_telemetry_packet(AP_HAL::UARTDriver *telem)
 {
 #if HAL_WITH_ESC_TELEM
     uint8_t buf[telem_packet_size];
-    if (uart->read(buf, telem_packet_size) < telem_packet_size) {
+    if (telem->read(buf, telem_packet_size) < telem_packet_size) {
         // short read, we should have 10 bytes ready when this function is called
         return;
     }
@@ -1641,22 +1641,22 @@ void AP_BLHeli::log_bidir_telemetry(void)
  */
 void AP_BLHeli::read_telem_uart(uint8_t idx, uint32_t now)
 {
-    AP_HAL::UARTDriver *uart = telem_uarts[idx];
-    if (uart == nullptr) {
+    AP_HAL::UARTDriver *telem = telem_uarts[idx];
+    if (telem == nullptr) {
         return;
     }
-    if (!telem_uart_started[idx] || !uart->is_owned_by_current_thread()) {
+    if (!telem_uart_started[idx] || !telem->is_owned_by_current_thread()) {
         // we need to use begin() here to ensure the correct thread owns the uart
-        uart->begin(115200);
+        telem->begin(115200);
         telem_uart_started[idx] = true;
     }
 
-    uint32_t nbytes = uart->available();
+    uint32_t nbytes = telem->available();
 
     if (nbytes > telem_packet_size) {
         // if we have more than 10 bytes then we don't know which ESC
         // they are from. Throw them all away
-        uart->discard_input();
+        telem->discard_input();
         return;
     }
     if (nbytes > 0 &&
@@ -1671,13 +1671,13 @@ void AP_BLHeli::read_telem_uart(uint8_t idx, uint32_t now)
     }
     if (nbytes > 0 && nbytes < telem_packet_size) {
         // we've waited long enough, discard bytes if we don't have 10 yet
-        uart->discard_input();
+        telem->discard_input();
         last_telem_byte_read_us[idx] = 0;
         return;
     }
     if (nbytes == telem_packet_size) {
         // we have a full packet ready to parse
-        read_telemetry_packet(uart);
+        read_telemetry_packet(telem);
         last_telem_byte_read_us[idx] = 0;
     }
 }

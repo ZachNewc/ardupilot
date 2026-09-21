@@ -149,13 +149,15 @@ a sign is wrong: ask for forward lean and watch whether all four vectors agree.
 The main working page. Per arm, or all arms together:
 
 - **Aim pad** — drag to set a thrust direction. The envelope drawn behind it is the real
-  reachable outline, traced server-side, not an assumed circle.
+  reachable outline, traced server-side, not an assumed circle. **Circle the envelope**
+  sweeps the inscribed circle of that outline — the widest lean that stays circular —
+  with every selected arm in step.
 - **Axis sliders** — drive one gimbal axis directly, in geometric degrees.
 - **Kinematics readout** — commanded tilt, resulting servo angle, pulse width, and
   whether an axis is at its limit.
-- **Motor test** — every ticked motor on every selected arm spins together, at one
-  throttle for one duration. Bounded by `bench_limits`, refused for any motor whose
-  `function` is unset, and refused entirely while the vehicle is armed.
+- **Motor test** — every ticked motor on every selected arm ramps up together to one
+  throttle, then holds for the asked duration. Bounded by `bench_limits`, refused for
+  any motor whose `function` is unset, and refused entirely while the vehicle is armed.
 
 Planned arms are shown but not commandable.
 
@@ -171,6 +173,17 @@ stabilise attitude, and it runs at 25 Hz over USB with unbounded latency.
 Controls are `level_gain`, `lead_time_s`, `max_tilt_fraction`, and the two invert flags.
 The page shows a live preview of what the law *would* command even while it is stopped,
 which makes it safe to reason about before committing anything to the servos.
+
+### Accel
+
+The other bench demo. It reads `SCALED_IMU`, subtracts gravity using attitude, and leans
+every live gimbal so motor thrust would oppose the remaining horizontal acceleration.
+A forward shove should point the rotors aft. Holding the frame at an angle should not.
+
+It does **not** spin the motors. Collective thrust is still the Arms page motor test,
+or ArduPilot. Same 25 Hz USB loop, same "this is not flight control" banner as
+Stabilize. Starting one demo switches the running law; retuning the idle page does not
+stop the other.
 
 ### Telemetry
 
@@ -271,15 +284,17 @@ A sign flip cannot land in one language only.
 |---|---|
 | No link | Every vehicle command is refused with a plain message, not queued |
 | No arms live | Commands refused; the reason is stated |
-| Browser tab closed | Live aiming released, levelling loop stopped |
+| Browser tab closed | Live aiming released, levelling and accel-hold loops stopped |
 | Two features want the servos | Arbiter grants one; the loser stops immediately |
-| Stop pressed | Takes ownership, centres everything, cancels motor tests |
+| Stop pressed | Cancels circling, levelling, motor tests, and a live drag |
+| **X** key | Zeroes every motor test immediately, from any page |
 | Motor test | Bounded in percent and seconds by `bench_limits` |
 | Unset `function` | That output is Disabled, so that motor cannot be spun at all |
 | Vehicle armed | Spinning is refused; the mixer owns the outputs |
 
 The controls that matter — Stop and Center — sit in the top bar on every page, not
-buried in whichever page happens to be open.
+buried in whichever page happens to be open. **X** is a keyboard kill for motors: it
+sends `stop_motors` immediately, including while a test is still ramping.
 
 ## Tests
 

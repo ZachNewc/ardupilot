@@ -159,13 +159,14 @@ async def websocket_endpoint(socket: WebSocket) -> None:
         pass
     finally:
         await hub.remove(socket)
-        # A closed tab must not leave the servos chasing a stale drag target or the
-        # levelling loop running with nobody watching.
+        # A closed tab must not leave the servos chasing a stale drag target, a
+        # circling sweep, or the levelling loop running with nobody watching.
         session.bench.end_live_aim()
         async with hub.lock:
             last_tab_closed = not hub.clients
         if last_tab_closed:
             session.controller.stop()
+            session.bench.stop_oscillate()
 
 
 async def index(_request: Any) -> Any:

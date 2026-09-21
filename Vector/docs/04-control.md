@@ -50,6 +50,7 @@ are second-order and must not be relied on for control.
 | **Thrust-vector mixing** | **New AP_Motors backend** | **400 Hz** | **Not written** |
 | Position and velocity | ArduPilot `AC_PosControl` | 100 Hz | Exists, needs a lateral-force path |
 | Bench levelling demo | Dashboard, host | 25 Hz | Exists, bench only |
+| Bench accel-hold demo | Dashboard, host | 25 Hz | Exists, bench only |
 
 Only one piece is genuinely missing: the mixer that turns a lateral-force demand into
 eight servo positions. [Firmware](05-firmware.md) covers its design.
@@ -80,9 +81,12 @@ What the bench loop *is* good for:
 - Measuring servo lag, which sets `lead_time_s`
 - Establishing gimbal centres and trims
 - Proving the kinematics are correct before committing them to firmware
+- Seeing the translation channel: shove the rig and the gimbals lean the motors against it
 
-That last point is the real value: the firmware mixer will use the same relationships,
-already validated.
+That last pair is the real value: the firmware mixer will use the same relationships,
+already validated. The Accel page is the same host loop with a different law — it
+opposes gravity-compensated linear acceleration by leaning thrust, and it is no more
+a flight controller than levelling is.
 
 ## The levelling law
 

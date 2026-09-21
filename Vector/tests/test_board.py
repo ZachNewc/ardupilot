@@ -251,6 +251,12 @@ class TestPayload(unittest.TestCase):
         # An ESC on the node's first output wants Motor1 there, a servo would want 64.
         self.assertEqual(33 if first["kind"] == "motor" else 64, first["nodeFunction"])
 
+    def test_serial_silk_matches_the_hwdef_order(self) -> None:
+        """RX4 is UART4 / SERIAL6; RX6 is USART6 / SERIAL7, the default RC pin."""
+        self.assertEqual(board.serial_rx_pad(6), "RX4")
+        self.assertEqual(board.serial_rx_pad(7), "RX6")
+        self.assertEqual(board.RCIN_SERIAL, 7)
+
 
 if __name__ == "__main__":
     unittest.main()

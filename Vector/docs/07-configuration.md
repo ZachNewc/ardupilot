@@ -204,7 +204,7 @@ See [Firmware](05-firmware.md) for the values under OCTAQUAD / PLUS.
 |---|---|---|
 | `device` | string | Serial device, e.g. `/dev/ttyACM0` |
 | `baud` | int | 115200 for USB |
-| `esc_telemetry_serials` | list of int | Which `SERIALn` ports carry ESC telemetry. `[4, 6]` is RX3 and RX4 on this board |
+| `esc_telemetry_serials` | list of int | Which `SERIALn` ports carry ESC telemetry. `[6, 7]` is RX4 and RX6 on this board |
 
 `esc_telemetry_serials` is asserted on connect (`SERIALn_PROTOCOL` = 16) and names
 the right parameters in the UI when nothing is reporting. A legacy
@@ -305,14 +305,14 @@ repeats them whenever output mapping is asserted.
     "coupling": 1.0,
     "outer": { "sign": -1, "center_us": 1500, "us_per_deg": 11.11111,
                "servo_limit_deg": 90.0, "min_us": 500, "max_us": 2500, "trim_deg": 0.0 },
-    "inner": { "sign":  1, "center_us": 1500, "us_per_deg": 11.11111,
+    "inner": { "sign": -1, "center_us": 1500, "us_per_deg": 11.11111,
                "servo_limit_deg": 90.0, "min_us": 500, "max_us": 2500, "trim_deg": 0.0 }
   },
   "arms": [ "north (live, inner S5 / outer S6, motors S2 lower / S1 upper)",
              "east  (live, inner S7 / outer S8, motors S11 lower / S12 upper)",
              "south (live, inner S9 / outer S10, motors S15 lower / S14 upper on CAN)",
              "west  (live, inner S3 / outer S4, motors S17 lower / S16 upper on CAN)" ],
-  "link": { "device": "/dev/ttyACM0", "baud": 115200, "esc_telemetry_serials": [4, 6] },
+  "link": { "device": "/dev/ttyACM0", "baud": 115200, "esc_telemetry_serials": [6, 7] },
   "bench_limits": { "motor_percent": 50.0, "motor_seconds": 10.0,
                     "servo_speed_deg_s": 180.0, "default_servo_speed_deg_s": 45.0,
                     "command_rate_hz": 25.0 },

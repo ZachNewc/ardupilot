@@ -83,20 +83,20 @@ constraint, not a coincidence, and it is discussed under [Headroom](#headroom) b
 
 ### Worked values, North arm
 
-`sign_outer = −1`, `sign_inner = +1`, `gear = 2`, `coupling = 1`, centre 1500 µs at
+`sign_outer = −1`, `sign_inner = −1`, `gear = 2`, `coupling = 1`, centre 1500 µs at
 11.111 µs/deg:
 
 | tilt (outer, inner) | servo outer | servo inner | pulse (outer, inner) |
 |---|---|---|---|
 | (0, 0) | 0° | 0° | 1500, 1500 |
 | (22.5, 0) | −45° | −45° | 1000, 1000 |
-| (0, 22.5) | 0° | +45° | 1500, 2000 |
-| (22.5, 22.5) | −45° | **0°** | 1000, 1500 |
-| (22.5, −22.5) | −45° | **−90°** | 1000, 500 |
-| (−22.5, −22.5) | +45° | **0°** | 2000, 1500 |
+| (0, 22.5) | 0° | −45° | 1500, 1000 |
+| (22.5, 22.5) | −45° | **−90°** | 1000, 500 |
+| (22.5, −22.5) | −45° | **0°** | 1000, 1500 |
+| (−22.5, −22.5) | +45° | **+90°** | 2000, 2500 |
 
-Two rows deserve attention. At (22.5, 22.5) the inner servo sits at **zero** — the
-coupling correction and the inner axis's own motion happen to cancel. At (22.5, −22.5)
+Two rows deserve attention. At (22.5, −22.5) the inner servo sits at **zero** — the
+coupling correction and the inner axis's own motion happen to cancel. At (22.5, 22.5)
 they add, and the inner servo is at its mechanical limit. So the inner servo's travel
 is consumed at the *corners* of the tilt square, and which corners depends on the signs.
 
@@ -282,7 +282,7 @@ With the current config the workspace is the **full ±22.5° square**:
 - Smallest tilt available in every direction: **22.5°** (along the axes)
 - Largest tilt available in any direction: **31.82°** (at the corners, = 22.5·√2)
 
-The corner (22.5, −22.5) is reachable but exactly consumes the inner servo's ±90°.
+The corner (22.5, 22.5) is reachable but exactly consumes the inner servo's ±90°.
 Reduce the inner servo's travel at all and the corners get cut off, turning the square
 into an octagon. The dashboard traces the real outline by casting a ray per azimuth
 rather than assuming a shape, so a config change of that kind shows up immediately on
@@ -357,6 +357,29 @@ target = up · gain, blended toward (0, 0, −1) as gain → 0
 
 At gain 1 and zero lead the commanded lean is exactly the true world-up direction, which
 is asserted directly in `tests/test_controller.py`.
+
+## 5.1 Opposing linear acceleration
+
+The Accel page uses a different law on the same host loop. ArduPilot IMUs report
+specific force in body NED, so a vehicle at rest reads approximately gravity, not
+zero. Gravity in body frame is the opposite of the levelling vector:
+
+```text
+g_down = −world_up_in_body(roll, pitch)
+a_lin  = imu_g − g_down
+```
+
+A static tilt therefore cancels. A real shove remains. The gimbals then lean motor
+thrust against the horizontal part:
+
+```text
+lean_forward = −gain · a_lin_x     # +X accel (forward shove) → aft lean
+lean_right   = −gain · a_lin_y     # +Y accel (right shove)  → left lean
+```
+
+`gain` is in degrees per g. Vertical linear accel is ignored — this loop does not
+modulate motor RPM. The same envelope cap as levelling applies. Signs and the rest-
+is-not-a-shove case are asserted in `tests/test_controller.py`.
 
 ## 6. Yaw by tangential tilt
 

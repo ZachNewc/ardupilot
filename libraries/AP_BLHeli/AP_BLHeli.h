@@ -291,7 +291,7 @@ private:
     bool BL_VerifyFlash(const uint8_t *buf, uint16_t n);
     void blheli_process_command(void);
     void run_connection_test(uint8_t chan);
-    void read_telemetry_packet(AP_HAL::UARTDriver *uart);
+    void read_telemetry_packet(AP_HAL::UARTDriver *telem);
     void read_telem_uart(uint8_t idx, uint32_t now);
     void log_bidir_telemetry(void);
 

@@ -98,10 +98,11 @@ Designed so that losing something does not leave the vehicle in an unknown state
 
 | Fault | Behaviour |
 |---|---|
-| Browser tab closed | Live aiming released, levelling loop stopped |
+| Browser tab closed | Live aiming released, levelling and accel-hold loops stopped |
 | Link lost mid-command | Loop exits; the vehicle holds its last commanded position |
 | Two features want the servos | Arbiter grants one; the other stops immediately |
 | Server killed | Vehicle holds last position. **Servos stay where they were** |
+| **X** key | Zeroes every motor test immediately, from any page |
 | Bad config edit | Rejected before writing; previous config keeps running |
 
 Note the third row carefully: **the vehicle holds its last commanded position** when the
@@ -110,9 +111,9 @@ full deflection, it stays there. Press Center before disconnecting.
 
 ## Where the controllers are, and are not
 
-The dashboard's levelling loop is a **bench demonstration**. It runs at 25 Hz over USB
-with unbounded latency and it commands lateral force, which does not stabilise attitude.
-[Control](04-control.md) explains both reasons in full.
+The dashboard's levelling and accel-hold loops are **bench demonstrations**. They run
+at 25 Hz over USB with unbounded latency and they command lateral force, which does
+not stabilise attitude. [Control](04-control.md) explains both reasons in full.
 
 Concretely:
 

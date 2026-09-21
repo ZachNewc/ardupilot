@@ -1,12 +1,10 @@
 <!--
-  Stabilize: the bench levelling demo.
+  Accel: bench demo that leans motor thrust against measured linear acceleration.
 
-  This page has one job beyond driving the loop, and it is to be honest about what
-  the loop is. It runs in Python over a serial link at tens of hertz, and on a plus
-  layout thrust vectoring produces almost no roll or pitch moment, so it cannot fly
-  the aircraft. Saying that clearly on screen is not a disclaimer — it is the reason
-  the firmware mixer exists, and a dashboard that implied otherwise would be
-  actively dangerous.
+  Same host-side loop as Stabilize, different law. Gravity is subtracted using
+  attitude so a static tilt is not treated as a shove. The gimbals point the
+  motors; this page does not spin them. Same mechanical and latency limits as
+  the gyro page: this is not flight control.
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
@@ -20,81 +18,76 @@ import StatTile from '../components/StatTile.vue'
 import StatusPill from '../components/StatusPill.vue'
 import ToggleRow from '../components/ToggleRow.vue'
 import { num, signedDeg } from '../lib/format'
-import { desiredLean } from '../lib/kinematics'
+import { desiredAccelLean } from '../lib/kinematics'
 import store, { arms, canCommand, commandBlockedReason, send } from '../lib/store'
 
 const controller = computed(() => store.state?.controller ?? null)
 const vehicle = computed(() => store.state?.vehicle ?? null)
 
-/* Local copies of the gains so a slider stays where it is put while the server
-   snapshot streams in at 20 Hz. */
-const gain = ref(1)
-const lead = ref(0.06)
+const gain = ref(40)
+const deadband = ref(0.05)
 const cap = ref(1)
-const invertRoll = ref(false)
-const invertPitch = ref(false)
+const invertX = ref(false)
+const invertY = ref(false)
 let seeded = false
 
 watch(
   controller,
   (value) => {
     if (!value || seeded) return
-    gain.value = value.levelGain
-    lead.value = value.leadTimeS
+    gain.value = value.accelGainDegG
+    deadband.value = value.accelDeadbandG
     cap.value = value.maxTiltFraction
-    invertRoll.value = value.invertRoll
-    invertPitch.value = value.invertPitch
+    invertX.value = value.invertAccelX
+    invertY.value = value.invertAccelY
     seeded = true
   },
   { immediate: true },
 )
 
 const active = computed(
-  () => controller.value?.active === true && controller.value.mode === 'level',
+  () => controller.value?.active === true && controller.value.mode === 'accel',
 )
 
 function payload(extra: Record<string, unknown> = {}) {
   return {
-    levelGain: gain.value,
-    leadTimeS: lead.value,
+    accelGainDegG: gain.value,
+    accelDeadbandG: deadband.value,
     maxTiltFraction: cap.value,
-    invertRoll: invertRoll.value,
-    invertPitch: invertPitch.value,
-    mode: 'level',
+    invertAccelX: invertX.value,
+    invertAccelY: invertY.value,
+    mode: 'accel',
     ...extra,
   }
 }
 
-/** Retune without toggling: the server applies gains then keeps the loop running. */
 function push() {
   send('level', payload({ active: active.value }))
 }
 
-const start = () => send('level', payload({ active: true, mode: 'level' }))
+const start = () => send('level', payload({ active: true, mode: 'accel' }))
 const stop = () => send('level', { active: false })
 
-/**
- * What the law would command at the current attitude, computed in the browser.
- *
- * This is the same arithmetic the server runs, so the page can show the intended
- * correction while the loop is switched off. It is a preview only; nothing here
- * reaches a servo.
- */
+const imuSeen = computed(() => (vehicle.value?.accelAgeS ?? null) !== null)
+const imuStale = computed(() => {
+  const age = vehicle.value?.accelAgeS
+  return age !== null && age !== undefined && age > 1
+})
+
 const localPreview = computed(() => {
-  if (!vehicle.value || !controller.value) return null
-  return desiredLean(
+  if (!vehicle.value || !controller.value || !imuSeen.value) return null
+  return desiredAccelLean(
     {
-      levelGain: gain.value,
-      leadTimeS: lead.value,
-      maxTiltFraction: cap.value,
-      invertRoll: invertRoll.value,
-      invertPitch: invertPitch.value,
+      accelGainDegG: gain.value,
+      accelDeadbandG: deadband.value,
+      invertAccelX: invertX.value,
+      invertAccelY: invertY.value,
       tiltCapDeg: controller.value.tiltCapDeg / Math.max(0.05, controller.value.maxTiltFraction),
+      maxTiltFraction: cap.value,
     },
+    [vehicle.value.accelXg, vehicle.value.accelYg, vehicle.value.accelZg],
     vehicle.value.rollDeg,
     vehicle.value.pitchDeg,
-    vehicle.value.rollRateDegS,
-    vehicle.value.pitchRateDegS,
   )
 })
 
@@ -106,11 +99,8 @@ const shown = computed(() =>
       : null,
 )
 
-const bodyTilt = computed(() =>
-  vehicle.value ? Math.hypot(vehicle.value.rollDeg, vehicle.value.pitchDeg) : 0,
-)
+const linear = computed(() => controller.value?.linearAccelG ?? null)
 
-/** Loop rate against the configured target: the number that shows why this is bench-only. */
 const rateTone = computed(() => {
   const hz = controller.value?.loopHz ?? 0
   const want = store.config?.benchLimits.commandRateHz ?? 25
@@ -123,7 +113,6 @@ const rateTone = computed(() => {
 
 <template>
   <div class="stack">
-    <!-- what this is -->
     <div class="scope">
       <div class="scope-head">
         <StatusPill tone="warn">bench demo</StatusPill>
@@ -131,28 +120,29 @@ const rateTone = computed(() => {
       </div>
       <div class="scope-body">
         <p>
-          Tilt the rig by hand and the gimbals counter-rotate so the motors keep pointing at
-          world vertical. That is worth seeing and worth tuning, and it proves the axis signs
-          and the kinematics are right. It is not a flight controller, for two reasons that no
-          amount of tuning fixes.
+          The IMU reports acceleration. Gravity is subtracted using attitude, then the
+          gimbals lean every live arm so the motors would push against the remaining
+          horizontal vector. Shove the rig forward and the rotors should point aft.
+          Holding the frame at an angle, without shoving it, should do nothing.
         </p>
         <ol>
           <li>
-            <strong>Mechanically.</strong> Leaning the thrust on a plus layout produces a
-            lateral force and a yaw moment, but almost no roll or pitch moment: a horizontal
-            force at a rotor in the centre-of-mass plane has no lever arm about those axes.
-            Roll and pitch authority comes from differential thrust between opposite arms,
-            which is ArduPilot's job. Vectoring buys translation while staying level; it does
-            not buy attitude authority.
+            <strong>Motors aim, they do not spin.</strong> Counteracting a force needs
+            thrust along the leaned direction. This loop only points the gimbals. Use
+            the Arms page motor test if you want the rotors turning, props off or the
+            vehicle clamped.
           </li>
           <li>
-            <strong>In timing.</strong> This loop runs in Python, over MAVLink, over a serial
-            link, at
-            <span class="mono">{{ num(controller?.loopHz, 0) }} Hz</span>. Attitude control
-            needs hundreds of hertz on a deterministic budget. The real controller belongs in
-            firmware as a custom <span class="mono">AP_Motors</span> backend &mdash; see
-            <RouterLink to="/docs/04-control">Control</RouterLink> and
-            <RouterLink to="/docs/05-firmware">Firmware</RouterLink>.
+            <strong>Mechanically.</strong> Leaned thrust on a plus layout is a lateral
+            force, not a roll or pitch moment. The
+            <RouterLink to="/stabilize">Stabilize</RouterLink> page holds world-vertical
+            with the gyros; this page opposes translation. Neither is an attitude
+            controller.
+          </li>
+          <li>
+            <strong>In timing.</strong> Same 25 Hz Python-over-USB loop as levelling.
+            A real mixer belongs in firmware &mdash; see
+            <RouterLink to="/docs/04-control">Control</RouterLink>.
           </li>
         </ol>
       </div>
@@ -160,12 +150,20 @@ const rateTone = computed(() => {
 
     <p v-if="commandBlockedReason" class="blocked">{{ commandBlockedReason }}</p>
     <p v-else-if="controller?.active && !active" class="blocked">
-      Accel hold is running. Start levelling to switch laws, or stop it from the
-      <RouterLink to="/accel">Accel</RouterLink> page.
+      Gyro levelling is running. Start accel hold to switch laws, or stop it from the
+      <RouterLink to="/stabilize">Stabilize</RouterLink> page.
+    </p>
+    <p v-else-if="!imuSeen" class="blocked">
+      Waiting for SCALED_IMU. Connect, then use Refresh streams on Telemetry if the
+      count stays at zero.
+    </p>
+    <p v-else-if="imuStale" class="blocked">
+      IMU samples are stale ({{ num(vehicle?.accelAgeS, 2) }} s). The loop will hold
+      centre until they resume.
     </p>
 
     <div class="layout">
-      <PanelCard title="Levelling" note="Body attitude against the lean the law is asking for.">
+      <PanelCard title="Accel hold" note="Horizontal linear accel against the lean the motors would produce.">
         <template #actions>
           <StatusPill :tone="active ? 'accent' : 'idle'" :pulse="active">
             {{ active ? 'running' : 'stopped' }}
@@ -183,27 +181,51 @@ const rateTone = computed(() => {
           <span><span class="key body" /> body tilt</span>
           <span>
             <span class="key lean" />
-            {{ active ? 'commanded lean' : 'lean it would command' }}
+            {{ active ? 'motor lean (oppose)' : 'lean it would command' }}
           </span>
           <span><span class="key env" /> cap {{ num(controller?.tiltCapDeg, 1) }}&#176;</span>
         </div>
 
         <div class="tiles two mt">
-          <StatTile label="Body off vertical" :value="signedDeg(bodyTilt)" />
+          <StatTile
+            label="Linear horiz"
+            :value="num(linear?.horizontal, 3)"
+            unit=" g"
+            :tone="(linear?.horizontal ?? 0) > 0.2 ? 'warn' : undefined"
+          />
           <StatTile
             label="Correction"
             :value="num(Math.hypot(shown?.forward ?? 0, shown?.right ?? 0), 1)"
             unit="&#176;"
             :tone="controller?.saturated ? 'warn' : undefined"
           />
+          <StatTile label="Lin fwd" :value="num(linear?.x, 3)" unit=" g" />
+          <StatTile label="Lin right" :value="num(linear?.y, 3)" unit=" g" />
           <StatTile label="Lean fwd" :value="signedDeg(shown?.forward)" />
           <StatTile label="Lean right" :value="signedDeg(shown?.right)" />
         </div>
 
-        <p v-if="controller?.saturated" class="warn small mt">
-          Saturated: the airframe is tilted further than the gimbals can correct, so the lean
-          is being held at the envelope edge in the right direction rather than clipped on one
-          axis.
+        <p v-if="controller?.saturated && active" class="warn small mt">
+          Saturated: the oppose demand is larger than the gimbals can reach, so the
+          lean is held at the envelope edge in the right direction.
+        </p>
+      </PanelCard>
+
+      <PanelCard title="IMU" note="Raw specific force, then gravity removed. Rest should be ~0, 0, +1 g raw.">
+        <div class="tiles two">
+          <StatTile label="IMU X" :value="num(vehicle?.accelXg, 3)" unit=" g" />
+          <StatTile label="IMU Y" :value="num(vehicle?.accelYg, 3)" unit=" g" />
+          <StatTile label="IMU Z" :value="num(vehicle?.accelZg, 3)" unit=" g" />
+          <StatTile
+            label="IMU age"
+            :value="imuSeen ? num(vehicle?.accelAgeS, 2) : '--'"
+            unit=" s"
+            :tone="!imuSeen || imuStale ? 'warn' : 'dim'"
+          />
+        </div>
+        <p class="faint small mt">
+          Body NED: X forward, Y right, Z down. Linear accel above is IMU minus
+          gravity expressed in that same frame.
         </p>
       </PanelCard>
 
@@ -211,23 +233,24 @@ const rateTone = computed(() => {
         <div class="stack">
           <SliderRow
             v-model="gain"
-            label="Level gain"
+            label="Oppose gain"
             :min="0"
-            :max="1.5"
-            :step="0.05"
-            :digits="2"
-            note="0 leaves the gimbals fixed to the airframe. 1 holds thrust at true world vertical. Above 1 over-corrects, which is only useful for provoking oscillation deliberately."
+            :max="90"
+            :step="1"
+            :digits="0"
+            unit=" deg/g"
+            note="Degrees of motor lean per g of horizontal linear accel. 40 deg/g uses most of the envelope at about half a g."
             @change="push"
           />
           <SliderRow
-            v-model="lead"
-            label="Lead time"
+            v-model="deadband"
+            label="Deadband"
             :min="0"
-            :max="0.25"
+            :max="0.2"
             :step="0.005"
             :digits="3"
-            unit=" s"
-            note="Extrapolates attitude forward to offset servo lag. It is a time, not an abstract gain, so it can be set from a measured step response: start at the servo's 60-degree time."
+            unit=" g"
+            note="Horizontal linear accel inside this band is treated as rest, so IMU noise does not hunt the servos."
             @change="push"
           />
           <SliderRow
@@ -243,23 +266,23 @@ const rateTone = computed(() => {
 
           <div class="stack tight">
             <ToggleRow
-              v-model="invertRoll"
-              label="Invert roll response"
-              note="Flip if the gimbals move the wrong way when the frame is rolled. Check this on the bench before anything spins."
+              v-model="invertX"
+              label="Invert forward response"
+              note="Flip if a forward shove leans the motors the wrong way. Check this on the bench before anything spins."
               @update:model-value="push"
             />
             <ToggleRow
-              v-model="invertPitch"
-              label="Invert pitch response"
+              v-model="invertY"
+              label="Invert right response"
               @update:model-value="push"
             />
           </div>
 
           <div class="row">
-            <button v-if="!active" class="primary grow" :disabled="!canCommand" @click="start">
-              Start levelling
+            <button v-if="!active" class="primary grow" :disabled="!canCommand || !imuSeen" @click="start">
+              Start accel hold
             </button>
-            <button v-else class="danger grow" @click="stop">Stop levelling</button>
+            <button v-else class="danger grow" @click="stop">Stop accel hold</button>
           </div>
 
           <p class="faint small">
@@ -288,14 +311,9 @@ const rateTone = computed(() => {
         </div>
 
         <p v-if="controller?.lastError" class="danger small mt">{{ controller.lastError }}</p>
-
-        <p class="faint small mt">
-          For scale: a firmware mixer runs at 400 Hz with bounded jitter. Anything here is
-          two orders of magnitude away from that, which is the honest measure of the gap.
-        </p>
       </PanelCard>
 
-      <PanelCard title="Arms" note="Every live arm should lean the same way. One that does not has a sign or mount-yaw error.">
+      <PanelCard title="Arms" note="Every live arm should lean the same way against the shove.">
         <FrameDiagram :arms="arms" />
       </PanelCard>
     </div>

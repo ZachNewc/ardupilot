@@ -2,9 +2,14 @@
 
 ## State of play
 
-The surrounding tree is ArduPilot with one Vector-needed change: `AP_BLHeli` reads
-every `SERIALn` set to ESC Telemetry (16), not only the first. Stock firmware would
-open RX3 and ignore RX4. Rebuild and flash after pulling that change.
+The surrounding tree is ArduPilot with Vector-needed changes. `AP_BLHeli` reads
+every `SERIALn` set to ESC Telemetry (16), not only the first. Copter's motor test
+keeps a mask of every `DO_MOTOR_TEST` sequence and writes them on one output cycle.
+Param 6 is that mask (bit 0 = sequence 1), so a full spin is one command instead of
+eight that can drop on USB. Stock firmware only updates the last sequence. The same
+path spools every masked motor together from stopped to the commanded throttle over
+up to two seconds (and at most half the test, so the target is actually held), so a
+1% bench test does not slam the ESCs. Rebuild and flash after pulling those changes.
 
 That is deliberate. The kinematics were derived and validated on the bench first, so
 the mixer can be written against relationships that are already known to be correct
@@ -75,12 +80,13 @@ unexpected motor.
 | `FRAME_CLASS` | 4 | OCTAQUAD. Needs a reboot |
 | `FRAME_TYPE` | 0 | PLUS, matching arms at 0/90/180/270 |
 | `SERVOn_FUNCTION` | 33–40 | Motor1–Motor8, per the table above |
-| `MOT_PWM_TYPE` | 6 | DShot600 |
+| `MOT_PWM_TYPE` | 6 | DShot600. Needed for T-wire requests. Reboot required |
 | `SERVO_DSHOT_ESC` | 1 | BLHeli, needed for the reverse command |
+| `SERVO_BLH_AUTO` | 1 | Attach BLHeli to every multicopter motor so T-wire is requested. Reboot required |
 | `SERVO_BLH_RVMASK` | bitmask | Bit N is SERVO(N+1). The only thing that sets direction |
 | `SERVOn_REVERSED` | 0 | Must be 0 on a motor. See below — it is not a direction control |
-| `SERIAL4_PROTOCOL` | 16 | ESC Telemetry on USART3 (RX3) |
 | `SERIAL6_PROTOCOL` | 16 | ESC Telemetry on UART4 (RX4) |
+| `SERIAL7_PROTOCOL` | 16 | ESC Telemetry on USART6 (RX6). This pin is RCIN until this is set |
 | `CAN_P1_DRIVER` | 1 | DroneCAN on CAN1. Reboot required |
 | `CAN_D1_PROTOCOL` | 1 | DroneCAN. Reboot required |
 | `CAN_D1_UC_SRV_BM` | bits for CAN servos | Servos on the node. Defaults to 0; currently none |
@@ -90,11 +96,13 @@ unexpected motor.
 | `CAN_D1_UC_OPTION` bit 4 | set | Send raw pulse widths to the expander |
 | `SERVO_32_ENABLE` | 1 | S17–S32 do not exist until this is set |
 
-The dashboard asserts the `SERVOn_FUNCTION` values, the DShot flags, the gimbal pulse
-limits and `SERIAL4_PROTOCOL` / `SERIAL6_PROTOCOL` on connect, all from `vector.json`,
-so the board cannot drift away from the config unnoticed. It deliberately does **not**
-write `FRAME_CLASS` or `FRAME_TYPE`: those need a reboot, and changing them rearranges
-which physical motor answers to which mixer slot. Serial protocol also needs a reboot.
+The dashboard asserts the `SERVOn_FUNCTION` values, `MOT_PWM_TYPE`, `SERVO_BLH_AUTO`,
+the other DShot flags, the gimbal pulse limits and `SERIAL6_PROTOCOL` /
+`SERIAL7_PROTOCOL` on connect, all from `vector.json`, so the board cannot drift away
+from the config unnoticed. It deliberately does **not** write `FRAME_CLASS` or
+`FRAME_TYPE`: those need a reboot, and changing them rearranges which physical motor
+answers to which mixer slot. `MOT_PWM_TYPE`, `SERVO_BLH_AUTO` and serial protocol
+also need a reboot.
 
 ## Rotation direction
 
